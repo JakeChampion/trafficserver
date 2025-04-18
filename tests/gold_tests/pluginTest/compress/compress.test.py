@@ -140,6 +140,14 @@ for i in range(3):
     tr.Processes.Default.ReturnCode = 0
     tr.Processes.Default.Command = curl(ts, i, "deflate")
 
+    tr = Test.AddTestRun(f'zstd: {i}')
+    tr.Processes.Default.ReturnCode = 0
+    out_path = get_out_path()
+    tr.MakeCurlCommand(curl(ts, i, "zstd", out_path))
+    tr = Test.AddTestRun(f'verify zstd: {i}')
+    tr.ReturnCode = 0
+    tr.Processes.Default.Command = get_verify_command(out_path, "zstd -d")
+
 # Test Accept-Encoding normalization.
 
 tr = Test.AddTestRun()

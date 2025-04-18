@@ -1428,6 +1428,26 @@ fi
 # Check for lzma presence and usability
 TS_CHECK_LZMA
 
+# Check for Zstandard
+AC_ARG_WITH([zstd],
+  [AS_HELP_STRING([--with-zstd], [Enable Zstandard compression support])],
+  [with_zstd=$withval], [with_zstd=yes])
+
+if test "x$with_zstd" = "xyes"; then
+  AC_CHECK_LIB([zstd], [ZSTD_compress], [have_zstd=yes], [have_zstd=no])
+  if test "x$have_zstd" = "xyes"; then
+    AC_CHECK_HEADER([zstd.h], [AC_DEFINE([HAVE_ZSTD_H], [1], [Define if zstd is available])])
+    ZSTD_LIB="-lzstd"
+    ZSTD_CFLAGS=""
+  else
+    AC_MSG_ERROR([zstd library not found])
+  fi
+fi
+
+AM_CONDITIONAL([HAVE_ZSTD], [test "x$have_zstd" = "xyes"])
+AC_SUBST([ZSTD_LIB])
+AC_SUBST([ZSTD_CFLAGS])
+
 AC_CHECK_FUNCS([clock_gettime kqueue epoll_ctl posix_fadvise posix_madvise posix_fallocate inotify_init])
 AC_CHECK_FUNCS([port_create strlcpy strlcat sysconf sysctlbyname getpagesize])
 AC_CHECK_FUNCS([getreuid getresuid getresgid setreuid setresuid getpeereid getpeerucred])
