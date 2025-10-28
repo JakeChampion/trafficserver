@@ -96,7 +96,7 @@ sessions:
         - [ X-Response-Identifier, { value: Empty-Accept-Encoding, as: equal } ]
         - [ X-Cache, { value: miss, as: equal } ]
 
-  # load an alternate of deflate Accept-Encoding header
+  # request deflate Accept-Encoding when origin lacks that variant
   - client-request:
       method: "GET"
       version: "1.1"
@@ -110,25 +110,15 @@ sessions:
       delay: 100ms
 
     server-response:
-      status: 200
-      reason: OK
-      headers:
-        fields:
-        - [ Transfer-Encoding, chunked ]
-        - [ Cache-Control, max-age=300 ]
-        - [ Content-Encoding, deflate ]
-        - [ Vary, Accept-Encoding ]
-        - [ Connection, close ]
-        - [ X-Response-Identifier, Deflate-Accept-Encoding ]
+      <<: *404_response
 
     proxy-response:
-      status: 200
+      status: 404
       headers:
         fields:
-        - [ X-Response-Identifier, { value: Deflate-Accept-Encoding, as: equal } ]
         - [ X-Cache, { value: miss, as: equal } ]
 
-  # load an alternate of br Accept-Encoding header
+  # request br Accept-Encoding when origin lacks that variant
   - client-request:
       method: "GET"
       version: "1.1"
@@ -142,22 +132,12 @@ sessions:
       delay: 100ms
 
     server-response:
-      status: 200
-      reason: OK
-      headers:
-        fields:
-        - [ Transfer-Encoding, chunked ]
-        - [ Cache-Control, max-age=300 ]
-        - [ Content-Encoding, br ]
-        - [ Vary, Accept-Encoding ]
-        - [ Connection, close ]
-        - [ X-Response-Identifier, Br-Accept-Encoding ]
+      <<: *404_response
 
     proxy-response:
-      status: 200
+      status: 404
       headers:
         fields:
-        - [ X-Response-Identifier, { value: Br-Accept-Encoding, as: equal } ]
         - [ X-Cache, { value: miss, as: equal } ]
 
   # load an alternate of gzip Accept-Encoding header
