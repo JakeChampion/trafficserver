@@ -16,6 +16,7 @@
 
 import os
 
+Test.SkipUnless(Condition.HasCurlFeature('meow'))
 Test.Summary = '''
 Test traffic_ctl config reload with remap.config .include directive
 '''

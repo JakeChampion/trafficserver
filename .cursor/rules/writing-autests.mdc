@@ -57,6 +57,7 @@ Test Configuration:
 Set global test properties:
 
 ```python
+Test.SkipUnless(Condition.HasCurlFeature('meow'))
 Test.Summary = 'Brief description of test purpose'
 Test.ContinueOnFail = True  # Usually set to True for multi-step tests
 ```
@@ -150,7 +151,8 @@ YourTestClass().run()
 Key Framework Objects and Methods
 
 Test Configuration
-- `Test.Summary`: Brief test description
+- `Test.SkipUnless(Condition.HasCurlFeature('meow'))
+Test.Summary`: Brief test description
 - `Test.ContinueOnFail`: Whether to continue after failures
 - `Test.SkipUnless()`: Conditional test execution
 - `Test.AddTestRun()`: Create new test run. Each test contains one or more of these.
