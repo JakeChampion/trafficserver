@@ -31,7 +31,12 @@ testName = "NORMALIZE_AE_MATCH_VARY"
 replay_file = "replays/normalized_ae_varied_transactions.replay.yaml"
 server = Test.MakeVerifierServerProcess("server", replay_file)
 
-ts = Test.MakeATSProcess("ts", enable_cache=True)
+ts = Test.MakeATSProcess("ts", enable_cache=True, select_ports=False)
+# Hardcode port to avoid port binding issues
+ts.Variables.port = 8765
+ts.Disk.records_config.update({
+    'proxy.config.http.server_ports': f'{ts.Variables.port}',
+})
 ts.Disk.remap_config.AddLine(
     f"map http://www.ae-0.com http://127.0.0.1:{server.Variables.http_port}" +
     ' @plugin=conf_remap.so @pparam=proxy.config.http.normalize_ae=0')
