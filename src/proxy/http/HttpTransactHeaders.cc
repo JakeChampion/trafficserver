@@ -48,6 +48,77 @@ DbgCtl dbg_ctl_http_trans{"http_trans"};
 DbgCtl dbg_ctl_http_transact_headers{"http_transact_headers"};
 DbgCtl dbg_ctl_anon{"anon"};
 
+bool
+ae_explicitly_forbids_identity(MIMEField *ae_field)
+{
+  if (!ae_field) {
+    return false;
+  }
+
+  StrList values;
+  ae_field->value_get_comma_list(&values);
+  bool identity_q0 = false;
+  bool wildcard_q0 = false;
+
+  constexpr std::string_view identity_token{"identity"sv};
+
+  for (Str *value = values.head; value; value = value->next) {
+    if (value->len == 0) {
+      continue;
+    }
+
+    StrList params;
+    HttpCompat::parse_semicolon_list(&params, value->str, value->len);
+    Str *token = params.head;
+    if (!token || token->len == 0) {
+      continue;
+    }
+
+    if (token->len == 1 && token->str[0] == '*') {
+      if (HttpCompat::find_Q_param_in_strlist(&params) == 0.0f) {
+        wildcard_q0 = true;
+      }
+      continue;
+    }
+
+    if (token->len == static_cast<int>(identity_token.size()) &&
+        strncasecmp(token->str, identity_token.data(), identity_token.size()) == 0) {
+      float q = HttpCompat::find_Q_param_in_strlist(&params);
+      if (q <= 0.0f) {
+        identity_q0 = true;
+      } else if (q > 0.0f) {
+        return false;
+      }
+    }
+  }
+
+  return identity_q0 || wildcard_q0;
+}
+
+void
+set_accept_encoding_value(HTTPHdr *header, MIMEField *ae_field, std::string_view value, bool forbid_identity)
+{
+  ink_assert(header != nullptr);
+  ink_assert(ae_field != nullptr);
+
+  if (!forbid_identity) {
+    if (value.empty()) {
+      header->field_delete(ae_field);
+    } else {
+      header->field_value_set(ae_field, value);
+    }
+    return;
+  }
+
+  if (value.empty()) {
+    header->field_value_set(ae_field, "identity;q=0"sv);
+    return;
+  }
+
+  header->field_value_set(ae_field, value);
+  header->field_value_append(ae_field, "identity;q=0"sv, true);
+}
+
 } // end anonymous namespace
 
 bool
@@ -1204,42 +1275,86 @@ HttpTransactHeaders::normalize_accept_encoding(const OverridableHttpConfigParams
     MIMEField *ae_field = header->field_find(static_cast<std::string_view>(MIME_FIELD_ACCEPT_ENCODING));
 
     if (ae_field) {
+      bool forbid_identity = ae_explicitly_forbids_identity(ae_field);
+
       if (normalize_ae == 1) {
-        // Force Accept-Encoding header to gzip or no header.
         if (HttpTransactCache::match_content_encoding(ae_field, "gzip")) {
-          header->field_value_set(ae_field, "gzip"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          set_accept_encoding_value(header, ae_field, "gzip"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          }
         } else {
-          header->field_delete(ae_field);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-gzip Accept-Encoding");
+          set_accept_encoding_value(header, ae_field, std::string_view{}, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] retained identity;q=0 while removing unsupported Accept-Encoding");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-gzip Accept-Encoding");
+          }
         }
       } else if (normalize_ae == 2) {
-        // Force Accept-Encoding header to br (Brotli) or no header.
         if (HttpTransactCache::match_content_encoding(ae_field, "br")) {
-          header->field_value_set(ae_field, "br"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br");
+          set_accept_encoding_value(header, ae_field, "br"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br");
+          }
         } else if (HttpTransactCache::match_content_encoding(ae_field, "gzip")) {
-          header->field_value_set(ae_field, "gzip"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          set_accept_encoding_value(header, ae_field, "gzip"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          }
         } else {
-          header->field_delete(ae_field);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-br Accept-Encoding");
+          set_accept_encoding_value(header, ae_field, std::string_view{}, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] retained identity;q=0 while removing unsupported Accept-Encoding");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-br Accept-Encoding");
+          }
         }
       } else if (normalize_ae == 3) {
-        // Force Accept-Encoding header to br,gzip, or br, or gzip, or no header.
         if (HttpTransactCache::match_content_encoding(ae_field, "br") &&
             HttpTransactCache::match_content_encoding(ae_field, "gzip")) {
-          header->field_value_set(ae_field, "br, gzip"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br, gzip");
+          set_accept_encoding_value(header, ae_field, "br, gzip"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br, gzip and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br, gzip");
+          }
         } else if (HttpTransactCache::match_content_encoding(ae_field, "br")) {
-          header->field_value_set(ae_field, "br"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br");
+          set_accept_encoding_value(header, ae_field, "br"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to br");
+          }
         } else if (HttpTransactCache::match_content_encoding(ae_field, "gzip")) {
-          header->field_value_set(ae_field, "gzip"sv);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          set_accept_encoding_value(header, ae_field, "gzip"sv, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip and preserved identity;q=0");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] normalized Accept-Encoding to gzip");
+          }
         } else {
-          header->field_delete(ae_field);
-          Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-br non-gzip Accept-Encoding");
+          set_accept_encoding_value(header, ae_field, std::string_view{}, forbid_identity);
+          if (forbid_identity) {
+            Dbg(dbg_ctl_http_trans,
+                "[Headers::normalize_accept_encoding] retained identity;q=0 while removing unsupported Accept-Encoding");
+          } else {
+            Dbg(dbg_ctl_http_trans, "[Headers::normalize_accept_encoding] removed non-br non-gzip Accept-Encoding");
+          }
         }
       } else {
         static bool logged = false;
