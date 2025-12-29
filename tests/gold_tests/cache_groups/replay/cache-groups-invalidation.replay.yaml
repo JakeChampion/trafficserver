@@ -1,0 +1,270 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+meta:
+  version: "1.0"
+
+# Configuration section for autest integration
+autest:
+  description: 'Test Cache-Group-Invalidation header removes cached objects'
+
+  dns:
+    name: 'dns-cache-groups-invalidation'
+
+  server:
+    name: 'server-cache-groups-invalidation'
+
+  client:
+    name: 'client-cache-groups-invalidation'
+
+  ats:
+    name: 'ts-cache-groups-invalidation'
+    process_config:
+      enable_cache: true
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache,x-cache-key,via'
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|cache_groups'
+      proxy.config.http.response_via_str: 3
+      proxy.config.http.insert_age_in_response: 0
+      # Enable cache groups feature
+      proxy.config.cache.groups.enabled: 1
+
+    remap_config:
+      - from: "http://www.example.com/"
+        to: "http://backend.example.com:{SERVER_HTTP_PORT}/"
+
+sessions:
+- transactions:
+
+  #############################################################################
+  # Test 1: Cache response with Cache-Groups header
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /product/12345
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, product-cache-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "33"]
+        - [Cache-Control, "max-age=300"]
+        # Response belongs to "product-catalog" group
+        - [Cache-Groups, '"product-catalog"']
+      content:
+        encoding: plain
+        data: '{"id": 12345, "name": "Widget A"}'
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: '{"id": 12345, "name": "Widget A"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 2: Verify response is cached
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /product/12345
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, product-cache-hit-before-invalidation]
+
+    # Server should not receive this request
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: '{"id": 12345, "name": "Widget A"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 3: Cache a second resource in the same group
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /product/67890
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, product2-cache-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "33"]
+        - [Cache-Control, "max-age=300"]
+        # Same group as first product
+        - [Cache-Groups, '"product-catalog"']
+      content:
+        encoding: plain
+        data: '{"id": 67890, "name": "Widget B"}'
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "miss", as: equal }]
+
+  #############################################################################
+  # Test 4: Send POST with Cache-Group-Invalidation to invalidate group
+  # RFC 9875: Invalidation only processed on unsafe method responses
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: POST
+      url: /admin/invalidate
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [Content-Type, application/json]
+        - [Content-Length, "33"]
+        - [uuid, invalidation-post]
+      content:
+        encoding: plain
+        data: '{"action": "clear-product-cache"}'
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "25"]
+        # Invalidate the product-catalog group
+        - [Cache-Group-Invalidation, '"product-catalog"']
+      content:
+        encoding: plain
+        data: '{"status": "invalidated"}'
+
+    proxy-response:
+      status: 200
+      content:
+        encoding: plain
+        data: '{"status": "invalidated"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 5: Verify first product is now a cache miss (invalidated)
+  #############################################################################
+  - client-request:
+      delay: 200ms
+      method: GET
+      url: /product/12345
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, product-cache-miss-after-invalidation]
+
+    # Server should receive this request since cache was invalidated
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "41"]
+        - [Cache-Control, "max-age=300"]
+        - [Cache-Groups, '"product-catalog"']
+      content:
+        encoding: plain
+        data: '{"id": 12345, "name": "Widget A Updated"}'
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        # Should be a miss because the cached response was invalidated
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: '{"id": 12345, "name": "Widget A Updated"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 6: Verify second product is also a cache miss (same group invalidated)
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /product/67890
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, product2-cache-miss-after-invalidation]
+
+    # Server should receive this request since cache was invalidated
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "41"]
+        - [Cache-Control, "max-age=300"]
+        - [Cache-Groups, '"product-catalog"']
+      content:
+        encoding: plain
+        data: '{"id": 67890, "name": "Widget B Updated"}'
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        # Should be a miss because the cached response was invalidated
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: '{"id": 67890, "name": "Widget B Updated"}'
+        verify: { as: equal }

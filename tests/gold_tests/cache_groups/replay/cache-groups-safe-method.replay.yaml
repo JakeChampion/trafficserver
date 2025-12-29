@@ -1,0 +1,316 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+meta:
+  version: "1.0"
+
+# Configuration section for autest integration
+autest:
+  description: 'Test Cache-Group-Invalidation is ignored on safe method responses'
+
+  dns:
+    name: 'dns-cache-groups-safe-method'
+
+  server:
+    name: 'server-cache-groups-safe-method'
+
+  client:
+    name: 'client-cache-groups-safe-method'
+
+  ats:
+    name: 'ts-cache-groups-safe-method'
+    process_config:
+      enable_cache: true
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache,x-cache-key,via'
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|cache_groups'
+      proxy.config.http.response_via_str: 3
+      proxy.config.http.insert_age_in_response: 0
+      # Enable cache groups feature
+      proxy.config.cache.groups.enabled: 1
+
+    remap_config:
+      - from: "http://www.example.com/"
+        to: "http://backend.example.com:{SERVER_HTTP_PORT}/"
+
+sessions:
+- transactions:
+
+  #############################################################################
+  # Test 1: Cache response with Cache-Groups header
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /article/123
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, article-cache-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, text/html]
+        - [Content-Length, "28"]
+        - [Cache-Control, "max-age=300"]
+        # Response belongs to "articles" group
+        - [Cache-Groups, '"articles"']
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Content</h1>"
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Content</h1>"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 2: Verify response is cached
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /article/123
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, article-cache-hit-initial]
+
+    # Server should not receive this request
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Content</h1>"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 3: Send GET request that receives Cache-Group-Invalidation header
+  # RFC 9875: Cache-Group-Invalidation MUST be ignored on safe method responses
+  # GET is a safe method (RFC 9110 Section 9.2.1)
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /check-status
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, safe-method-with-invalidation]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "20"]
+        # This invalidation header should be IGNORED because this is a GET response
+        - [Cache-Group-Invalidation, '"articles"']
+      content:
+        encoding: plain
+        data: '{"status": "active"}'
+
+    proxy-response:
+      status: 200
+      content:
+        encoding: plain
+        data: '{"status": "active"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 4: Verify article is STILL cached (invalidation was ignored)
+  # This proves Cache-Group-Invalidation on safe method was correctly ignored
+  #############################################################################
+  - client-request:
+      delay: 200ms
+      method: GET
+      url: /article/123
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, article-still-cached-after-safe-method]
+
+    # Server should NOT receive this request - article should still be cached
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        # Should STILL be a cache hit because invalidation on GET was ignored
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Content</h1>"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 5: HEAD request with Cache-Group-Invalidation (also safe method)
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: HEAD
+      url: /check-head
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [uuid, head-with-invalidation]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, text/plain]
+        - [Content-Length, "0"]
+        # This invalidation should also be ignored (HEAD is safe)
+        - [Cache-Group-Invalidation, '"articles"']
+
+    proxy-response:
+      status: 200
+
+  #############################################################################
+  # Test 6: Verify article is STILL cached after HEAD with invalidation
+  #############################################################################
+  - client-request:
+      delay: 200ms
+      method: GET
+      url: /article/123
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, article-still-cached-after-head]
+
+    # Server should NOT receive this request
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        # Should STILL be cached
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Content</h1>"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 7: Now use POST (unsafe method) to invalidate - should work
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: POST
+      url: /admin/clear-cache
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [Content-Type, application/json]
+        - [Content-Length, "2"]
+        - [uuid, post-invalidation]
+      content:
+        encoding: plain
+        data: '{}'
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "16"]
+        # This SHOULD work because POST is unsafe
+        - [Cache-Group-Invalidation, '"articles"']
+      content:
+        encoding: plain
+        data: '{"cleared":true}'
+
+    proxy-response:
+      status: 200
+
+  #############################################################################
+  # Test 8: Verify article is NOW invalidated (POST invalidation worked)
+  #############################################################################
+  - client-request:
+      delay: 200ms
+      method: GET
+      url: /article/123
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, article-miss-after-post-invalidation]
+
+    # Server SHOULD receive this request now
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, text/html]
+        - [Content-Length, "36"]
+        - [Cache-Control, "max-age=300"]
+        - [Cache-Groups, '"articles"']
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Updated Content</h1>"
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        # Should be a MISS because POST invalidation was processed
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: "<h1>Article 123 Updated Content</h1>"
+        verify: { as: equal }

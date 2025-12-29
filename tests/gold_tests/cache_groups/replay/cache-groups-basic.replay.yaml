@@ -1,0 +1,254 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+meta:
+  version: "1.0"
+
+# Configuration section for autest integration
+autest:
+  description: 'Test basic Cache-Groups header storage and retrieval'
+
+  dns:
+    name: 'dns-cache-groups-basic'
+
+  server:
+    name: 'server-cache-groups-basic'
+
+  client:
+    name: 'client-cache-groups-basic'
+
+  ats:
+    name: 'ts-cache-groups-basic'
+    process_config:
+      enable_cache: true
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache,x-cache-key,via'
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|cache_groups'
+      proxy.config.http.response_via_str: 3
+      proxy.config.http.insert_age_in_response: 0
+      # Enable cache groups feature
+      proxy.config.cache.groups.enabled: 1
+
+    remap_config:
+      - from: "http://www.example.com/"
+        to: "http://backend.example.com:{SERVER_HTTP_PORT}/"
+
+sessions:
+- transactions:
+
+  #############################################################################
+  # Test 1: Cache miss - populate cache with response containing Cache-Groups
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /resource-with-groups
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, cache-groups-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, text/plain]
+        - [Content-Length, "24"]
+        - [Cache-Control, "max-age=300"]
+        # RFC 9875: Cache-Groups is a Structured Fields List of Strings
+        - [Cache-Groups, '"product-images", "storefront"']
+      content:
+        encoding: plain
+        data: "content with cache group"
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Cache-Control, { value: "max-age=300", as: equal }]
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: "content with cache group"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 2: Cache hit - verify response served from cache
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /resource-with-groups
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, cache-groups-hit]
+
+    # Server should not receive this request (it's cached)
+    server-response:
+      status: 404
+      reason: Not Found
+
+    # Expect cached 200 response
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Cache-Control, { value: "max-age=300", as: equal }]
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: "content with cache group"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 3: Multiple groups - cache response with multiple group memberships
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /multi-group-resource
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, multi-groups-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, application/json]
+        - [Content-Length, "30"]
+        - [Cache-Control, "max-age=300"]
+        # Response belongs to multiple groups
+        - [Cache-Groups, '"api-responses", "user-data", "v2-endpoints"']
+      content:
+        encoding: plain
+        data: '{"status": "multi-group-test"}'
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: '{"status": "multi-group-test"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 4: Verify multi-group resource cached correctly
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /multi-group-resource
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, multi-groups-hit]
+
+    # Server should not receive this request
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: '{"status": "multi-group-test"}'
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 5: Response without Cache-Groups - normal caching behavior
+  #############################################################################
+  - client-request:
+      method: GET
+      url: /no-groups-resource
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, no-groups-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Type, text/plain]
+        - [Content-Length, "21"]
+        - [Cache-Control, "max-age=300"]
+        # No Cache-Groups header
+      content:
+        encoding: plain
+        data: "content without group"
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "miss", as: equal }]
+      content:
+        encoding: plain
+        data: "content without group"
+        verify: { as: equal }
+
+  #############################################################################
+  # Test 6: Verify no-groups resource cached correctly
+  #############################################################################
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /no-groups-resource
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, www.example.com]
+        - [x-debug, "x-cache,x-cache-key,via"]
+        - [uuid, no-groups-hit]
+
+    # Server should not receive this request
+    server-response:
+      status: 500
+      reason: Internal Server Error
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: "hit-fresh", as: equal }]
+      content:
+        encoding: plain
+        data: "content without group"
+        verify: { as: equal }
