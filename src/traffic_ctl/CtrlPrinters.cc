@@ -27,6 +27,7 @@
 
 #include "CtrlPrinters.h"
 #include "jsonrpc/ctrl_yaml_codecs.h"
+#include "jsonrpc/CtrlRPCRequests.h"
 #include "PrintUtils.h"
 
 #include "TrafficCtlStatus.h"
@@ -373,5 +374,123 @@ void
 ServerStatusPrinter::write_output(YAML::Node const &result)
 {
   write_output_json(result["data"] ? result["data"] : result);
+}
+//------------------------------------------------------------------------------------------------------------------------------------
+// Cache Groups Printer Implementations
+//------------------------------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+/// @brief Helper to format bytes into a human-readable string.
+std::string
+format_bytes(int64_t bytes)
+{
+  std::string text;
+  if (bytes >= 1099511627776LL) {
+    return swoc::bwprint(text, "{:.2f} TB", static_cast<double>(bytes) / 1099511627776.0);
+  } else if (bytes >= 1073741824LL) {
+    return swoc::bwprint(text, "{:.2f} GB", static_cast<double>(bytes) / 1073741824.0);
+  } else if (bytes >= 1048576LL) {
+    return swoc::bwprint(text, "{:.2f} MB", static_cast<double>(bytes) / 1048576.0);
+  } else if (bytes >= 1024LL) {
+    return swoc::bwprint(text, "{:.2f} KB", static_cast<double>(bytes) / 1024.0);
+  }
+  return swoc::bwprint(text, "{} B", bytes);
+}
+} // namespace
+
+void
+CacheGroupsListPrinter::write_output(YAML::Node const &result)
+{
+  if (is_json_format()) {
+    write_output_json(result);
+    return;
+  }
+
+  auto const &response = result.as<CacheGroupsListResponse>();
+
+  if (response.groups.empty()) {
+    std::cout << "No cache groups found.\n";
+    return;
+  }
+
+  std::string text;
+  std::cout << swoc::bwprint(text, "{:<30} {:<40} {:>12} {:>15}\n", "GROUP NAME", "ORIGIN", "ENTRIES", "SIZE");
+  std::cout << std::string(97, '-') << '\n';
+
+  for (auto const &group : response.groups) {
+    std::cout << swoc::bwprint(text, "{:<30} {:<40} {:>12} {:>15}\n", group.name, group.origin, group.entry_count,
+                               format_bytes(group.size_bytes));
+  }
+}
+//------------------------------------------------------------------------------------------------------------------------------------
+void
+CacheGroupsShowPrinter::write_output(YAML::Node const &result)
+{
+  if (is_json_format()) {
+    write_output_json(result);
+    return;
+  }
+
+  auto const &response = result.as<CacheGroupsShowResponse>();
+  std::string text;
+
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Name", response.name);
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Origin", response.origin);
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Entry Count", response.entry_count);
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Size", format_bytes(response.size_bytes));
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Created At", response.created_at);
+  std::cout << swoc::bwprint(text, "{:16s}: {}\n", "Last Accessed", response.last_accessed);
+
+  if (!response.urls.empty()) {
+    std::cout << swoc::bwprint(text, "{:16s}:\n", "Sample URLs");
+    for (auto const &url : response.urls) {
+      std::cout << "  - " << url << '\n';
+    }
+  }
+}
+//------------------------------------------------------------------------------------------------------------------------------------
+void
+CacheGroupsInvalidatePrinter::write_output(YAML::Node const &result)
+{
+  if (is_json_format()) {
+    write_output_json(result);
+    return;
+  }
+
+  auto const &response = result.as<CacheGroupsInvalidateResponse>();
+  std::string text;
+
+  if (response.success) {
+    std::cout << swoc::bwprint(text, "Successfully invalidated cache group '{}'\n", response.group_name);
+    std::cout << swoc::bwprint(text, "  Entries invalidated: {}\n", response.entries_invalidated);
+    std::cout << swoc::bwprint(text, "  Bytes freed: {}\n", format_bytes(response.bytes_freed));
+  } else {
+    std::cout << swoc::bwprint(text, "Failed to invalidate cache group '{}'\n", response.group_name);
+    if (!response.message.empty()) {
+      std::cout << swoc::bwprint(text, "  Error: {}\n", response.message);
+    }
+  }
+}
+//------------------------------------------------------------------------------------------------------------------------------------
+void
+CacheGroupsStatsPrinter::write_output(YAML::Node const &result)
+{
+  if (is_json_format()) {
+    write_output_json(result);
+    return;
+  }
+
+  auto const &response = result.as<CacheGroupsStatsResponse>();
+  std::string text;
+
+  std::cout << "Cache Groups Statistics\n";
+  std::cout << std::string(40, '-') << '\n';
+  std::cout << swoc::bwprint(text, "{:20s}: {}\n", "Total Groups", response.total_groups);
+  std::cout << swoc::bwprint(text, "{:20s}: {}\n", "Total Entries", response.total_entries);
+  std::cout << swoc::bwprint(text, "{:20s}: {}\n", "Total Size", format_bytes(response.total_size_bytes));
+  std::cout << swoc::bwprint(text, "{:20s}: {}\n", "Hits", response.hits);
+  std::cout << swoc::bwprint(text, "{:20s}: {}\n", "Misses", response.misses);
+  std::cout << swoc::bwprint(text, "{:20s}: {:.2f}%\n", "Hit Ratio", response.hit_ratio * 100.0);
 }
 //-------------------------------------------------------------------------------------------------------------------------------------

@@ -162,4 +162,109 @@ template <> struct convert<HostStatusLookUpResponse> {
     return true;
   }
 };
+//------------------------------------------------------------------------------------------------------------------------------------
+// Cache Groups YAML codecs
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsListRequest::Params> {
+  static Node
+  encode(CacheGroupsListRequest::Params const &params)
+  {
+    Node node;
+    if (!params.origin.empty()) {
+      node["origin"] = params.origin;
+    }
+    return node;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsShowRequest::Params> {
+  static Node
+  encode(CacheGroupsShowRequest::Params const &params)
+  {
+    Node node;
+    node["group_name"] = params.group_name;
+    if (!params.origin.empty()) {
+      node["origin"] = params.origin;
+    }
+    return node;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsInvalidateRequest::Params> {
+  static Node
+  encode(CacheGroupsInvalidateRequest::Params const &params)
+  {
+    Node node;
+    node["group_name"] = params.group_name;
+    if (!params.origin.empty()) {
+      node["origin"] = params.origin;
+    }
+    return node;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsListResponse> {
+  static bool
+  decode(Node const &node, CacheGroupsListResponse &info)
+  {
+    if (auto groups = node["groups"]) {
+      for (auto &&item : groups) {
+        CacheGroupsListResponse::GroupInfo gi;
+        gi.name        = helper::try_extract<std::string>(item, "name");
+        gi.origin      = helper::try_extract<std::string>(item, "origin");
+        gi.entry_count = helper::try_extract<int64_t>(item, "entry_count");
+        gi.size_bytes  = helper::try_extract<int64_t>(item, "size_bytes");
+        info.groups.push_back(gi);
+      }
+    }
+    return true;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsShowResponse> {
+  static bool
+  decode(Node const &node, CacheGroupsShowResponse &info)
+  {
+    info.name          = helper::try_extract<std::string>(node, "name");
+    info.origin        = helper::try_extract<std::string>(node, "origin");
+    info.entry_count   = helper::try_extract<int64_t>(node, "entry_count");
+    info.size_bytes    = helper::try_extract<int64_t>(node, "size_bytes");
+    info.created_at    = helper::try_extract<std::string>(node, "created_at");
+    info.last_accessed = helper::try_extract<std::string>(node, "last_accessed");
+
+    if (auto urls = node["urls"]) {
+      for (auto &&url : urls) {
+        info.urls.push_back(url.Scalar());
+      }
+    }
+    return true;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsInvalidateResponse> {
+  static bool
+  decode(Node const &node, CacheGroupsInvalidateResponse &info)
+  {
+    info.group_name          = helper::try_extract<std::string>(node, "group_name");
+    info.entries_invalidated = helper::try_extract<int64_t>(node, "entries_invalidated");
+    info.bytes_freed         = helper::try_extract<int64_t>(node, "bytes_freed");
+    info.success             = helper::try_extract<bool>(node, "success");
+    info.message             = helper::try_extract<std::string>(node, "message");
+    return true;
+  }
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+template <> struct convert<CacheGroupsStatsResponse> {
+  static bool
+  decode(Node const &node, CacheGroupsStatsResponse &info)
+  {
+    info.total_groups     = helper::try_extract<int64_t>(node, "total_groups");
+    info.total_entries    = helper::try_extract<int64_t>(node, "total_entries");
+    info.total_size_bytes = helper::try_extract<int64_t>(node, "total_size_bytes");
+    info.hits             = helper::try_extract<int64_t>(node, "hits");
+    info.misses           = helper::try_extract<int64_t>(node, "misses");
+    info.hit_ratio        = helper::try_extract<double>(node, "hit_ratio");
+    return true;
+  }
+};
 } // namespace YAML

@@ -321,6 +321,7 @@ enum TSEvent {
   TS_EVENT_CACHE_LOOKUP_COMPLETE        = 1133,
   TS_EVENT_CACHE_READ_READY             = 1134,
   TS_EVENT_CACHE_READ_COMPLETE          = 1135,
+  TS_EVENT_CACHE_GROUP_INVALIDATION     = 1136,
 
   TS_EVENT_INTERNAL_1200 = 1200,
 
@@ -492,6 +493,10 @@ enum TSHttpHookID {
   TS_VCONN_OUTBOUND_START_HOOK,
   TS_VCONN_OUTBOUND_CLOSE_HOOK,
   TS_SSL_LAST_HOOK = TS_VCONN_OUTBOUND_CLOSE_HOOK,
+
+  // Cache group invalidation hook - called when a cache group is invalidated
+  TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK,
+
   TS_HTTP_LAST_HOOK,
 };
 
@@ -1152,6 +1157,24 @@ struct TSHttpConnectOptions {
   int64_t                id;
   TSIOBufferSizeIndex    buffer_index;
   TSIOBufferWaterMark    buffer_water_mark;
+};
+
+/**
+    Information about a cache group invalidation event.
+
+    This structure is passed to plugins registered for the
+    TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK. The hook is called once per
+    invalidation event (not per object), providing a batch of affected
+    objects to the plugin.
+ */
+struct TSCacheGroupInvalidationInfo {
+  const char *group_name;     ///< Name of the cache group being invalidated
+  int         group_name_len; ///< Length of group_name
+  const char *origin;         ///< Origin associated with the invalidation (may be NULL)
+  int         origin_len;     ///< Length of origin
+  int         object_count;   ///< Number of cache keys in the keys array
+  TSCacheKey *keys;           ///< Array of cache keys being invalidated
+  TSHttpTxn   triggering_txn; ///< Transaction that triggered invalidation (may be NULL for admin-triggered)
 };
 
 /* --------------------------------------------------------------------------

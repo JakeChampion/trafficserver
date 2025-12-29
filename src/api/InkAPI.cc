@@ -3144,6 +3144,36 @@ TSCacheKeyDestroy(TSCacheKey key)
   return TS_SUCCESS;
 }
 
+TSReturnCode
+TSCacheGroupInvalidationInfoGet(TSCont contp, TSCacheGroupInvalidationInfo *info)
+{
+  sdk_assert(sdk_sanity_check_continuation(contp) == TS_SUCCESS);
+
+  if (info == nullptr) {
+    return TS_ERROR;
+  }
+
+  INKContInternal *i = reinterpret_cast<INKContInternal *>(contp);
+
+  // The invalidation info is stored in the continuation's event data during the hook callback.
+  // The caller must be within a TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK callback for this to work.
+  TSCacheGroupInvalidationInfo *source_info = static_cast<TSCacheGroupInvalidationInfo *>(i->mdata);
+  if (source_info == nullptr) {
+    return TS_ERROR;
+  }
+
+  // Copy the invalidation info to the caller's structure
+  info->group_name     = source_info->group_name;
+  info->group_name_len = source_info->group_name_len;
+  info->origin         = source_info->origin;
+  info->origin_len     = source_info->origin_len;
+  info->object_count   = source_info->object_count;
+  info->keys           = source_info->keys;
+  info->triggering_txn = source_info->triggering_txn;
+
+  return TS_SUCCESS;
+}
+
 TSCacheHttpInfo
 TSCacheHttpInfoCopy(TSCacheHttpInfo infop)
 {

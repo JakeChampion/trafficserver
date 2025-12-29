@@ -302,3 +302,37 @@ public:
   ServerStatusPrinter(BasePrinter::Options opt) : BasePrinter(opt) {}
 };
 //------------------------------------------------------------------------------------------------------------------------------------
+// Cache Groups Printers
+//------------------------------------------------------------------------------------------------------------------------------------
+class CacheGroupsListPrinter : public BasePrinter
+{
+  void write_output(YAML::Node const &result) override;
+
+public:
+  CacheGroupsListPrinter(BasePrinter::Options opt) : BasePrinter(opt) {}
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+class CacheGroupsShowPrinter : public BasePrinter
+{
+  void write_output(YAML::Node const &result) override;
+
+public:
+  CacheGroupsShowPrinter(BasePrinter::Options opt) : BasePrinter(opt) {}
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+class CacheGroupsInvalidatePrinter : public BasePrinter
+{
+  void write_output(YAML::Node const &result) override;
+
+public:
+  CacheGroupsInvalidatePrinter(BasePrinter::Options opt) : BasePrinter(opt) {}
+};
+//------------------------------------------------------------------------------------------------------------------------------------
+class CacheGroupsStatsPrinter : public BasePrinter
+{
+  void write_output(YAML::Node const &result) override;
+
+public:
+  CacheGroupsStatsPrinter(BasePrinter::Options opt) : BasePrinter(opt) {}
+};
+//------------------------------------------------------------------------------------------------------------------------------------

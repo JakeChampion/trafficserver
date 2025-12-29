@@ -1220,6 +1220,28 @@ TSReturnCode TSCacheUrlSet(TSHttpTxn txnp, const char *url, int length);
 TSReturnCode TSCacheKeyDataTypeSet(TSCacheKey key, TSCacheDataType type);
 
 /* --------------------------------------------------------------------------
+   Cache group invalidation */
+
+/**
+    Retrieves information about a cache group invalidation event.
+
+    This function should be called from within a TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK
+    callback to obtain details about the invalidation event.
+
+    @param contp The continuation that received the hook callback.
+    @param info  Pointer to a TSCacheGroupInvalidationInfo structure that will
+                 be filled with invalidation details.
+
+    @return TS_SUCCESS if the information was successfully retrieved,
+            TS_ERROR if the call was made outside of an invalidation hook
+            or if invalid parameters were provided.
+
+    @note The hook is called once per invalidation event (not per object).
+    @note The triggering_txn field may be NULL for admin-triggered invalidations.
+ */
+TSReturnCode TSCacheGroupInvalidationInfoGet(TSCont contp, TSCacheGroupInvalidationInfo *info);
+
+/* --------------------------------------------------------------------------
    Configuration */
 unsigned int TSConfigSet(unsigned int id, void *data, TSConfigDestroyFunc funcp);
 TSConfig     TSConfigGet(unsigned int id);

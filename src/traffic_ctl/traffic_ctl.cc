@@ -32,6 +32,7 @@
 
 #include "CtrlCommands.h"
 #include "FileConfigCommand.h"
+#include "CacheGroupsCommand.h"
 #include "TrafficCtlStatus.h"
 
 // Define the global variable

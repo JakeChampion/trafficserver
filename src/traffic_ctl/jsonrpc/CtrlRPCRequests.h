@@ -263,3 +263,111 @@ struct SetDebugServerRequest : ConfigSetRecordRequest {
     super::params.push_back(Params{"proxy.config.diags.debug.enabled", std::move(enable_value)});
   }
 };
+//------------------------------------------------------------------------------------------------------------------------------------
+// Cache Groups API request/response definitions
+//------------------------------------------------------------------------------------------------------------------------------------
+
+/// @brief Request to list cache groups, optionally filtered by origin.
+struct CacheGroupsListRequest : shared::rpc::ClientRequest {
+  using super = shared::rpc::ClientRequest;
+  struct Params {
+    std::string origin; // Optional: filter by origin
+  };
+
+  CacheGroupsListRequest() = default;
+  CacheGroupsListRequest(Params p) { super::params = p; }
+
+  std::string
+  get_method() const override
+  {
+    return "cache.groups.list";
+  }
+};
+
+/// @brief Response structure for cache groups list.
+struct CacheGroupsListResponse {
+  struct GroupInfo {
+    std::string name;
+    std::string origin;
+    int64_t     entry_count{0};
+    int64_t     size_bytes{0};
+  };
+  std::vector<GroupInfo> groups;
+};
+
+/// @brief Request to show details of a specific cache group.
+struct CacheGroupsShowRequest : shared::rpc::ClientRequest {
+  using super = shared::rpc::ClientRequest;
+  struct Params {
+    std::string group_name;
+    std::string origin; // Optional: filter by origin
+  };
+
+  CacheGroupsShowRequest() = default;
+  CacheGroupsShowRequest(Params p) { super::params = p; }
+
+  std::string
+  get_method() const override
+  {
+    return "cache.groups.show";
+  }
+};
+
+/// @brief Response structure for cache group details.
+struct CacheGroupsShowResponse {
+  std::string              name;
+  std::string              origin;
+  int64_t                  entry_count{0};
+  int64_t                  size_bytes{0};
+  std::string              created_at;
+  std::string              last_accessed;
+  std::vector<std::string> urls; // Sample URLs in this group
+};
+
+/// @brief Request to invalidate a cache group.
+struct CacheGroupsInvalidateRequest : shared::rpc::ClientRequest {
+  using super = shared::rpc::ClientRequest;
+  struct Params {
+    std::string group_name;
+    std::string origin; // Optional: filter by origin
+  };
+
+  CacheGroupsInvalidateRequest() = default;
+  CacheGroupsInvalidateRequest(Params p) { super::params = p; }
+
+  std::string
+  get_method() const override
+  {
+    return "cache.groups.invalidate";
+  }
+};
+
+/// @brief Response structure for cache group invalidation.
+struct CacheGroupsInvalidateResponse {
+  std::string group_name;
+  int64_t     entries_invalidated{0};
+  int64_t     bytes_freed{0};
+  bool        success{false};
+  std::string message;
+};
+
+/// @brief Request to get cache groups statistics.
+struct CacheGroupsStatsRequest : shared::rpc::ClientRequest {
+  using super = shared::rpc::ClientRequest;
+
+  std::string
+  get_method() const override
+  {
+    return "cache.groups.stats";
+  }
+};
+
+/// @brief Response structure for cache groups statistics.
+struct CacheGroupsStatsResponse {
+  int64_t total_groups{0};
+  int64_t total_entries{0};
+  int64_t total_size_bytes{0};
+  int64_t hits{0};
+  int64_t misses{0};
+  double  hit_ratio{0.0};
+};
