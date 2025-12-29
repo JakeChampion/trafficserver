@@ -66,7 +66,8 @@ enum class ParserState {
   GzipCompressionLevel,
   BrotliCompressionLevel,
   BrotliLGWSize,
-  ZstdCompressionLevel
+  ZstdCompressionLevel,
+  AlgorithmPriority
 };
 
 void
@@ -279,7 +280,8 @@ static const std::unordered_map<std::string_view, ParserState> KeywordToStateMap
   {"gzip-compression-level",         ParserState::GzipCompressionLevel       },
   {"brotli-compression-level",       ParserState::BrotliCompressionLevel     },
   {"brotli-lgwin",                   ParserState::BrotliLGWSize              },
-  {"zstd-compression-level",         ParserState::ZstdCompressionLevel       }
+  {"zstd-compression-level",         ParserState::ZstdCompressionLevel       },
+  {"algorithm-priority",             ParserState::AlgorithmPriority          }
 };
 
 void
@@ -289,6 +291,44 @@ HostConfiguration::set_range_request(swoc::TextView token)
     range_request_ctl_ = RangeRequestLexicon[token];
   } catch (std::domain_error const &) {
     error("invalid token for range_request: %.*s", static_cast<int>(token.size()), token.data());
+  }
+}
+
+void
+HostConfiguration::set_algorithm_priority(swoc::TextView line)
+{
+  algorithm_priority_.clear();
+  for (;;) {
+    auto token = extractFirstToken(line, isCommaOrSpace);
+    if (token.empty()) {
+      break;
+    }
+    if (token == "zstd") {
+#ifdef HAVE_ZSTD_H
+      algorithm_priority_.push_back(ALGORITHM_ZSTD);
+#else
+      error("algorithm-priority: zstd support not compiled in.");
+#endif
+    } else if (token == "br") {
+#ifdef HAVE_BROTLI_ENCODE_H
+      algorithm_priority_.push_back(ALGORITHM_BROTLI);
+#else
+      error("algorithm-priority: brotli support not compiled in.");
+#endif
+    } else if (token == "gzip") {
+      algorithm_priority_.push_back(ALGORITHM_GZIP);
+    } else if (token == "deflate") {
+      algorithm_priority_.push_back(ALGORITHM_DEFLATE);
+    } else {
+      error("Unknown algorithm in algorithm-priority: %.*s. Supported: zstd, br, gzip, deflate", static_cast<int>(token.size()),
+            token.data());
+    }
+  }
+
+  // If priority list is empty after parsing, restore defaults
+  if (algorithm_priority_.empty()) {
+    algorithm_priority_ = {ALGORITHM_ZSTD, ALGORITHM_BROTLI, ALGORITHM_GZIP, ALGORITHM_DEFLATE};
+    warning("algorithm-priority was empty, using default priority");
   }
 }
 
@@ -454,6 +494,12 @@ Configuration::Parse(const char *path)
         state = ParserState::Start;
         break;
       }
+      case ParserState::AlgorithmPriority:
+        // The entire line_view contains the priority list (comma or space separated)
+        current_host_configuration->set_algorithm_priority(line_view);
+        line_view.clear(); // Consume the rest of the line
+        state = ParserState::Start;
+        break;
       }
     }
   }

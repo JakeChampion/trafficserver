@@ -202,6 +202,15 @@ public:
   void               add_compression_algorithms(swoc::TextView algorithms);
   [[nodiscard]] int  compression_algorithms();
   void               set_range_request(swoc::TextView token);
+  void               set_algorithm_priority(swoc::TextView algorithms);
+
+  // Returns the algorithm priority list. The first element is highest priority.
+  // Each element is one of: ALGORITHM_ZSTD, ALGORITHM_BROTLI, ALGORITHM_GZIP, ALGORITHM_DEFLATE
+  [[nodiscard]] const std::vector<int> &
+  algorithm_priority() const
+  {
+    return algorithm_priority_;
+  }
 
 private:
   std::string  host_;
@@ -223,6 +232,9 @@ private:
   // maintain backwards compatibility/usability out of the box
   std::set<TSHttpStatus> compressible_status_codes_ = {TS_HTTP_STATUS_OK, TS_HTTP_STATUS_PARTIAL_CONTENT,
                                                        TS_HTTP_STATUS_NOT_MODIFIED};
+
+  // Algorithm priority order. Default: zstd > brotli > gzip > deflate
+  std::vector<int> algorithm_priority_ = {ALGORITHM_ZSTD, ALGORITHM_BROTLI, ALGORITHM_GZIP, ALGORITHM_DEFLATE};
 };
 
 using HostContainer = std::vector<HostConfiguration *>;
@@ -234,6 +246,15 @@ class Configuration : private atscppapi::noncopyable
 public:
   [[nodiscard]] static Configuration *Parse(const char *path);
   [[nodiscard]] HostConfiguration    *find(const char *host, int host_length);
+
+  // Destructor to clean up HostConfiguration objects
+  ~Configuration()
+  {
+    for (auto *hc : host_configurations_) {
+      delete hc;
+    }
+    host_configurations_.clear();
+  }
 
 private:
   explicit Configuration() {}
