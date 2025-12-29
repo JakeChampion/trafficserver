@@ -51,6 +51,8 @@ using namespace std::literals;
 #include "proxy/IPAllow.h"
 #include "iocore/utils/Machine.h"
 #include "ts/ats_probe.h"
+#include "tscore/StructuredFields.h"
+#include "../../iocore/cache/CacheGroupInvalidation.h"
 
 DbgCtl HttpTransact::State::_dbg_ctl{"http"};
 
@@ -79,6 +81,12 @@ DbgCtl dbg_ctl_http_trans_websocket_upgrade_post_remap{"http_trans_websocket_upg
 DbgCtl dbg_ctl_parent_down{"parent_down"};
 DbgCtl dbg_ctl_url_rewrite{"url_rewrite"};
 DbgCtl dbg_ctl_ip_allow{"ip_allow"};
+DbgCtl dbg_ctl_cache_groups{"cache_groups"};
+
+// Cache-Groups header names (RFC 9875)
+constexpr std::string_view CACHE_GROUPS_HEADER{"Cache-Groups"};
+constexpr std::string_view CACHE_GROUP_INVALIDATION_HEADER{"Cache-Group-Invalidation"};
+
 } // namespace
 
 // Support ip_resolve override.
@@ -4029,6 +4037,54 @@ HttpTransact::handle_forward_server_connection_open(State *s)
     }
   }
 
+  // Process Cache-Group-Invalidation header (RFC 9875) for ALL responses
+  // This must happen before cache operations so invalidation takes effect immediately
+  // Only process on unsafe methods (POST, PUT, DELETE, PATCH, etc.)
+  {
+    int method = s->hdr_info.client_request.method_get_wksidx();
+    // Safe methods are GET, HEAD, OPTIONS, TRACE - all others are unsafe
+    bool is_unsafe_method =
+      (method != HTTP_WKSIDX_GET && method != HTTP_WKSIDX_HEAD && method != HTTP_WKSIDX_OPTIONS && method != HTTP_WKSIDX_TRACE);
+
+    if (is_unsafe_method) {
+      MIMEField *invalidation_field = s->hdr_info.server_response.field_find(CACHE_GROUP_INVALIDATION_HEADER);
+      if (invalidation_field) {
+        std::string_view header_value = invalidation_field->value_get();
+        if (!header_value.empty()) {
+          constexpr int            max_groups      = 32;
+          constexpr int            max_name_length = 64;
+          std::vector<std::string> groups          = SFListParser::parse_list_of_strings(header_value, max_groups, max_name_length);
+
+          if (!groups.empty()) {
+            // Get the origin for scoped invalidation
+            URL        *url = s->hdr_info.client_request.url_get();
+            std::string origin;
+            if (url && url->valid()) {
+              std::string_view host = url->host_get();
+              if (!host.empty()) {
+                origin = std::string(host);
+              }
+            }
+
+            // Queue invalidation for each group
+            for (const auto &group : groups) {
+              queue_group_invalidation(group, origin);
+              TxnDbg(dbg_ctl_cache_groups, "queued invalidation for group '%s' origin '%s'", group.c_str(), origin.c_str());
+            }
+          } else {
+            TxnDbg(dbg_ctl_cache_groups, "Cache-Group-Invalidation header parse failed or empty");
+          }
+        }
+      }
+    } else {
+      // Check if there's a Cache-Group-Invalidation header on safe method - this is ignored per RFC
+      MIMEField *invalidation_field = s->hdr_info.server_response.field_find(CACHE_GROUP_INVALIDATION_HEADER);
+      if (invalidation_field) {
+        TxnDbg(dbg_ctl_cache_groups, "ignoring Cache-Group-Invalidation header on safe method (RFC 9875)");
+      }
+    }
+  }
+
   switch (s->cache_info.action) {
   case CacheAction_t::WRITE:
   /* fall through */
@@ -4166,6 +4222,10 @@ HttpTransact::handle_cache_operation_on_forward_server_response(State *s)
 {
   TxnDbg(dbg_ctl_http_trans, "(hcoofsr)");
   TxnDbg(dbg_ctl_http_seq, "Entering handle_cache_operation_on_forward_server_response");
+
+  // NOTE: Cache-Group-Invalidation header processing has been moved to
+  // handle_forward_server_connection_open() so it runs for ALL responses,
+  // including those that don't go through cache operations (like POST responses).
 
   HTTPHdr    *base_response        = nullptr;
   HTTPStatus  server_response_code = HTTPStatus::NONE;
@@ -4973,6 +5033,28 @@ HttpTransact::set_headers_for_cache_write(State *s, HTTPInfo *cache_info, HTTPHd
   // If we're ignoring auth, then we don't want to cache WWW-Auth headers
   if (s->txn_conf->cache_ignore_auth) {
     cache_info->response_get()->field_delete(static_cast<std::string_view>(MIME_FIELD_WWW_AUTHENTICATE));
+  }
+
+  // Process Cache-Groups header (RFC 9875) if enabled
+  // This stores the group membership in the cache metadata for later invalidation
+  {
+    MIMEField *cache_groups_field = response->field_find(CACHE_GROUPS_HEADER);
+    if (cache_groups_field) {
+      std::string_view header_value = cache_groups_field->value_get();
+      if (!header_value.empty()) {
+        // Get configured limits
+        constexpr int            max_groups      = 32;
+        constexpr int            max_name_length = 64;
+        std::vector<std::string> groups          = SFListParser::parse_list_of_strings(header_value, max_groups, max_name_length);
+
+        if (!groups.empty()) {
+          cache_info->cache_groups_set(groups);
+          Dbg(dbg_ctl_cache_groups, "stored %zu cache groups for response", groups.size());
+        } else {
+          Dbg(dbg_ctl_cache_groups, "Cache-Groups header parse failed or empty");
+        }
+      }
+    }
   }
 
   dump_header(dbg_ctl_http_hdrs, cache_info->request_get(), s->state_machine_id(), "Cached Request Hdr");

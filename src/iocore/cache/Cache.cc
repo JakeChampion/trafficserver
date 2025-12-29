@@ -49,6 +49,7 @@
 #define SCAN_WRITER_LOCK_MAX_RETRY 5
 
 extern void register_cache_stats(CacheStatsBlock *rsb, const std::string &prefix);
+extern void register_cache_groups_stats(CacheGroupsStatsBlock *rsb, int metrics_verbosity);
 
 constexpr ts::VersionNumber CACHE_DB_VERSION(CACHE_DB_MAJOR_VERSION, CACHE_DB_MINOR_VERSION);
 
@@ -82,10 +83,12 @@ int     cache_config_mutex_retry_delay             = 2;
 int     cache_read_while_writer_retry_delay        = 50;
 int     cache_config_read_while_writer_max_retries = 10;
 int     cache_config_persist_bad_disks             = false;
+int     cache_config_groups_enabled                = 0;
 
 // Globals
 
 CacheStatsBlock                           cache_rsb;
+CacheGroupsStatsBlock                     cache_groups_rsb;
 Cache                                    *theCache = nullptr;
 std::vector<std::unique_ptr<CacheDisk>>   gdisks;
 int                                       gndisks                      = 0;
@@ -881,6 +884,15 @@ ink_cache_init(ts::ModuleVersion v)
   Dbg(dbg_ctl_cache_init, "proxy.config.cache.enable_read_while_writer = %d", cache_config_read_while_writer);
 
   register_cache_stats(&cache_rsb, "proxy.process.cache");
+
+  // Register cache groups metrics based on configured verbosity level
+  int cache_groups_metrics_verbosity = RecGetRecordInt("proxy.config.cache.groups.metrics_verbosity").value_or(1);
+  register_cache_groups_stats(&cache_groups_rsb, cache_groups_metrics_verbosity);
+  Dbg(dbg_ctl_cache_init, "proxy.config.cache.groups.metrics_verbosity = %d", cache_groups_metrics_verbosity);
+
+  // Cache Groups (RFC 9875) configuration
+  RecEstablishStaticConfigInt32(cache_config_groups_enabled, "proxy.config.cache.groups.enabled");
+  Dbg(dbg_ctl_cache_init, "proxy.config.cache.groups.enabled = %d", cache_config_groups_enabled);
 
   cacheProcessor.wait_for_cache = RecGetRecordInt("proxy.config.http.wait_for_cache").value_or(0);
 

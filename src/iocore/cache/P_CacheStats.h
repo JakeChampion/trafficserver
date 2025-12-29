@@ -73,3 +73,26 @@ struct CacheStatsBlock {
   ts::Metrics::Gauge::AtomicType   *span_online           = nullptr;
   ts::Metrics::Gauge::AtomicType   *span_failing          = nullptr;
 };
+
+/**
+ * Cache Groups metrics block for RFC 9875 Cache Groups feature.
+ *
+ * This structure holds pointers to metrics for the cache groups subsystem.
+ * Metrics are registered based on the configured verbosity level:
+ * - verbosity >= 1: Basic metrics (total_groups, total_memberships, invalidation_events, objects_invalidated)
+ * - verbosity >= 2: Detailed metrics (index_memory_bytes, pending_invalidations, avg_invalidation_latency_ms,
+ * header_parse_failures)
+ */
+struct CacheGroupsStatsBlock {
+  // Basic metrics (verbosity >= 1)
+  ts::Metrics::Gauge::AtomicType   *total_groups        = nullptr; ///< Current number of unique cache groups
+  ts::Metrics::Gauge::AtomicType   *total_memberships   = nullptr; ///< Total group memberships across all cached objects
+  ts::Metrics::Counter::AtomicType *invalidation_events = nullptr; ///< Number of group invalidation events processed
+  ts::Metrics::Counter::AtomicType *objects_invalidated = nullptr; ///< Total number of objects invalidated
+
+  // Detailed metrics (verbosity >= 2)
+  ts::Metrics::Gauge::AtomicType   *index_memory_bytes          = nullptr; ///< Memory used by group index structures
+  ts::Metrics::Gauge::AtomicType   *pending_invalidations       = nullptr; ///< Number of pending invalidation work items
+  ts::Metrics::Gauge::AtomicType   *avg_invalidation_latency_ms = nullptr; ///< Average invalidation latency in milliseconds
+  ts::Metrics::Counter::AtomicType *header_parse_failures       = nullptr; ///< Number of Cache-Groups header parse failures
+};

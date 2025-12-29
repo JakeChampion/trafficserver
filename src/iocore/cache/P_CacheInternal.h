@@ -24,6 +24,7 @@
 #pragma once
 
 #include "P_CacheHosting.h"
+#include "P_CacheStats.h"
 #include "iocore/eventsystem/Continuation.h"
 #include "P_CacheHttp.h"
 #include "tsutil/Metrics.h"
@@ -90,7 +91,8 @@ struct EvacuationBlock;
     return EVENT_CONT;                                                    \
   } while (0)
 
-extern CacheStatsBlock cache_rsb;
+extern CacheStatsBlock       cache_rsb;
+extern CacheGroupsStatsBlock cache_groups_rsb;
 
 // Configuration
 extern int cache_config_dir_sync_frequency;
@@ -117,6 +119,7 @@ extern int cache_config_target_fragment_size;
 extern int cache_config_mutex_retry_delay;
 extern int cache_read_while_writer_retry_delay;
 extern int cache_config_read_while_writer_max_retries;
+extern int cache_config_groups_enabled;
 
 #define PUSH_HANDLER(_x)                                          \
   do {                                                            \

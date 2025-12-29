@@ -267,6 +267,8 @@ HttpDebugNames::get_event_name(int event)
     return "TS_EVENT_CACHE_READ_READY";
   case TS_EVENT_CACHE_READ_COMPLETE:
     return "TS_EVENT_CACHE_READ_COMPLETE";
+  case TS_EVENT_CACHE_GROUP_INVALIDATION:
+    return "TS_EVENT_CACHE_GROUP_INVALIDATION";
   case TS_EVENT_INTERNAL_1200:
     return "TS_EVENT_INTERNAL_1200";
   case TS_EVENT_SSL_SESSION_NEW:
@@ -597,6 +599,8 @@ HttpDebugNames::get_api_hook_name(TSHttpHookID t)
     return "TS_VCONN_OUTBOUND_START_HOOK";
   case TS_VCONN_OUTBOUND_CLOSE_HOOK:
     return "TS_VCONN_OUTBOUND_CLOSE_HOOK";
+  case TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK:
+    return "TS_HTTP_CACHE_GROUP_INVALIDATION_HOOK";
   }
 
   return "unknown hook";

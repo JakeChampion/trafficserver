@@ -901,6 +901,39 @@ static constexpr RecordElement RecordsConfig[] =
 
   //##############################################################################
   //#
+  //# Cache Groups
+  //#
+  //##############################################################################
+  //# Enable cache groups feature (default: disabled)
+  {RECT_CONFIG, "proxy.config.cache.groups.enabled", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  //# Group scope: origin, remap, global
+  {RECT_CONFIG, "proxy.config.cache.groups.scope", RECD_STRING, "origin", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
+  ,
+  //# Maximum groups per response
+  {RECT_CONFIG, "proxy.config.cache.groups.max_groups", RECD_INT, "32", RECU_DYNAMIC, RR_NULL, RECC_STR, "^[0-9]+$", RECA_NULL}
+  ,
+  //# Maximum group name length
+  {RECT_CONFIG, "proxy.config.cache.groups.max_name_length", RECD_INT, "64", RECU_DYNAMIC, RR_NULL, RECC_STR, "^[0-9]+$", RECA_NULL}
+  ,
+  //# Invalidation batch size per event loop tick
+  {RECT_CONFIG, "proxy.config.cache.groups.invalidation_batch_size", RECD_INT, "100", RECU_DYNAMIC, RR_NULL, RECC_STR, "^[0-9]+$", RECA_NULL}
+  ,
+  //# Metrics verbosity: 0=minimal, 1=basic, 2=detailed
+  {RECT_CONFIG, "proxy.config.cache.groups.metrics_verbosity", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-2]", RECA_NULL}
+  ,
+  //# Forward Cache-Groups header to clients
+  {RECT_CONFIG, "proxy.config.cache.groups.forward_header", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  //# Process invalidation in cache hierarchy (child caches)
+  {RECT_CONFIG, "proxy.config.cache.groups.hierarchy_propagate", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  //# Stale-while-revalidate behavior on invalidation: 0=stop, 1=continue
+  {RECT_CONFIG, "proxy.config.cache.groups.swr_on_invalidation", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+
+  //##############################################################################
+  //#
   //# DNS
   //#
   //##############################################################################
