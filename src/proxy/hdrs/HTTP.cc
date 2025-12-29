@@ -1966,6 +1966,7 @@ HTTPCacheAlt::destroy()
     ats_free(m_frag_offsets);
     m_frag_offsets = nullptr;
   }
+  m_cache_groups.clear();
   httpCacheAltAllocator.free(this);
 }
 
@@ -1992,6 +1993,8 @@ HTTPCacheAlt::copy(HTTPCacheAlt *to_copy)
   m_request_sent_time      = to_copy->m_request_sent_time;
   m_response_received_time = to_copy->m_response_received_time;
   this->copy_frag_offsets_from(to_copy);
+
+  m_cache_groups = to_copy->m_cache_groups;
 }
 
 void
@@ -2061,6 +2064,15 @@ HTTPInfo::marshal_length()
     len += sizeof(FragOffset) * m_alt->m_frag_offset_count;
   }
 
+  // Add space for cache groups:
+  // [uint32_t group_count]
+  // [for each group: uint16_t length, char[] data]
+  len += sizeof(uint32_t); // group count
+  for (const auto &group : m_alt->m_cache_groups) {
+    len += sizeof(uint16_t); // length prefix
+    len += group.size();     // group string data
+  }
+
   return len;
 }
 
@@ -2115,9 +2127,33 @@ HTTPInfo::marshal(char *buf, int len)
     tmp                                = m_alt->m_response_hdr.m_heap->marshal(buf, len - used);
     marshal_alt->m_response_hdr.m_heap = (HdrHeap *)static_cast<intptr_t>(used);
     ink_assert(((intptr_t)marshal_alt->m_response_hdr.m_heap) < len);
+    buf  += tmp;
     used += tmp;
   } else {
     marshal_alt->m_response_hdr.m_heap = nullptr;
+  }
+
+  // Marshal cache groups:
+  // [uint32_t group_count]
+  // [for each group: uint16_t length, char[] data]
+  {
+    uint32_t group_count = static_cast<uint32_t>(m_alt->m_cache_groups.size());
+    memcpy(buf, &group_count, sizeof(uint32_t));
+    buf  += sizeof(uint32_t);
+    used += sizeof(uint32_t);
+
+    for (const auto &group : m_alt->m_cache_groups) {
+      uint16_t group_len = static_cast<uint16_t>(group.size());
+      memcpy(buf, &group_len, sizeof(uint16_t));
+      buf  += sizeof(uint16_t);
+      used += sizeof(uint16_t);
+
+      if (group_len > 0) {
+        memcpy(buf, group.data(), group_len);
+        buf  += group_len;
+        used += group_len;
+      }
+    }
   }
 
   // The prior system failed the marshal if there wasn't
@@ -2189,6 +2225,33 @@ HTTPInfo::unmarshal(char *buf, int len, RefCountObj *block_ref)
     alt->m_response_hdr.m_heap = heap;
     alt->m_response_hdr.m_http = hh;
     alt->m_response_hdr.m_mime = hh->m_fields_impl;
+  }
+
+  // Unmarshal cache groups (with backward compatibility for older cached objects)
+  // Older cached objects won't have cache group data, so we need to check if there's
+  // remaining data. At minimum we need sizeof(uint32_t) for the group count.
+  alt->m_cache_groups.clear();
+  if (len >= static_cast<int>(sizeof(uint32_t))) {
+    char    *data_ptr    = buf + (orig_len - len);
+    uint32_t group_count = 0;
+    memcpy(&group_count, data_ptr, sizeof(uint32_t));
+    data_ptr += sizeof(uint32_t);
+    len      -= sizeof(uint32_t);
+
+    for (uint32_t i = 0; i < group_count && len >= static_cast<int>(sizeof(uint16_t)); ++i) {
+      uint16_t group_len = 0;
+      memcpy(&group_len, data_ptr, sizeof(uint16_t));
+      data_ptr += sizeof(uint16_t);
+      len      -= sizeof(uint16_t);
+
+      if (group_len > 0 && len >= group_len) {
+        alt->m_cache_groups.emplace_back(data_ptr, group_len);
+        data_ptr += group_len;
+        len      -= group_len;
+      } else if (group_len == 0) {
+        alt->m_cache_groups.emplace_back();
+      }
+    }
   }
 
   alt->m_unmarshal_len = orig_len - len;
@@ -2271,6 +2334,9 @@ HTTPInfo::unmarshal_v24_1(char *buf, int len, RefCountObj *block_ref)
     alt->m_response_hdr.m_http = hh;
     alt->m_response_hdr.m_mime = hh->m_fields_impl;
   }
+
+  // v24_1 format doesn't have cache groups, so just ensure the vector is empty
+  alt->m_cache_groups.clear();
 
   alt->m_unmarshal_len = orig_len - len;
 

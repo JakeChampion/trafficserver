@@ -24,7 +24,9 @@
 #pragma once
 
 #include <cassert>
+#include <string>
 #include <string_view>
+#include <vector>
 
 using namespace std::literals;
 
@@ -1265,6 +1267,10 @@ struct HTTPCacheAlt {
   //  since our ownership model requires explicit
   //  destroys and ref count pointers defeat this
   RefCountObj *m_ext_buffer = nullptr;
+
+  /// Cache groups this cached object belongs to.
+  /// Used for cache group invalidation.
+  std::vector<std::string> m_cache_groups;
 };
 
 class HTTPInfo
@@ -1405,6 +1411,20 @@ public:
   int get_frag_offset_count();
   /// Add an @a offset to the end of the fragment offset table.
   void push_frag_offset(FragOffset offset);
+
+  /// Set the cache groups this object belongs to.
+  void
+  cache_groups_set(const std::vector<std::string> &groups)
+  {
+    m_alt->m_cache_groups = groups;
+  }
+
+  /// Get the cache groups this object belongs to.
+  const std::vector<std::string> &
+  cache_groups_get() const
+  {
+    return m_alt->m_cache_groups;
+  }
 
   // Sanity check functions
   static bool check_marshalled(char *buf, int len);
