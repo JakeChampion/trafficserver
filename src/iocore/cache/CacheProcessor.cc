@@ -24,6 +24,8 @@
 #include "iocore/cache/Cache.h"
 #include "iocore/cache/CacheDefs.h"
 #include "iocore/cache/Store.h"
+#include "CacheGroupGC.h"
+#include "CacheGroupInvalidation.h"
 #include "P_CacheDisk.h"
 #include "P_CacheInternal.h"
 #include "StripeSM.h"
@@ -67,6 +69,7 @@ static void    persist_bad_disks();
 int            cplist_reconfigure();
 void           cplist_init();
 void           register_cache_stats(CacheStatsBlock *rsb, const std::string &prefix);
+void           register_cache_groups_stats(CacheGroupsStatsBlock *rsb, int metrics_verbosity);
 static void    cplist_update();
 static int     create_volume(int volume_number, off_t size_in_blocks, CacheType scheme, CacheVol *cp);
 static int     fillExclusiveDisks(CacheVol *cp);
@@ -1152,6 +1155,30 @@ register_cache_stats(CacheStatsBlock *rsb, const std::string &prefix)
   rsb->span_online           = ts::Metrics::Gauge::createPtr(prefix + ".span.online");
 }
 
+// Register Cache Groups stats based on metrics_verbosity configuration.
+// This registers the RFC 9875 Cache Groups metrics.
+void
+register_cache_groups_stats(CacheGroupsStatsBlock *rsb, int metrics_verbosity)
+{
+  const std::string prefix = "proxy.process.cache.groups";
+
+  // Basic metrics (verbosity >= 1)
+  if (metrics_verbosity >= 1) {
+    rsb->total_groups        = ts::Metrics::Gauge::createPtr(prefix + ".total_groups");
+    rsb->total_memberships   = ts::Metrics::Gauge::createPtr(prefix + ".total_memberships");
+    rsb->invalidation_events = ts::Metrics::Counter::createPtr(prefix + ".invalidation_events");
+    rsb->objects_invalidated = ts::Metrics::Counter::createPtr(prefix + ".objects_invalidated");
+  }
+
+  // Detailed metrics (verbosity >= 2)
+  if (metrics_verbosity >= 2) {
+    rsb->index_memory_bytes          = ts::Metrics::Gauge::createPtr(prefix + ".index_memory_bytes");
+    rsb->pending_invalidations       = ts::Metrics::Gauge::createPtr(prefix + ".pending_invalidations");
+    rsb->avg_invalidation_latency_ms = ts::Metrics::Gauge::createPtr(prefix + ".avg_invalidation_latency_ms");
+    rsb->header_parse_failures       = ts::Metrics::Counter::createPtr(prefix + ".header_parse_failures");
+  }
+}
+
 void
 cplist_update()
 {
@@ -1543,6 +1570,9 @@ CacheProcessor::cacheInitialized()
     CacheProcessor::initialized = CacheInitState::INITIALIZED;
     CacheProcessor::cache_ready = caches_ready;
     Note("cache enabled");
+
+    // Initialize cache groups invalidation subsystem (RFC 9875)
+    cache_group_invalidation_init();
   } else {
     CacheProcessor::initialized = CacheInitState::FAILED;
     Note("cache disabled");

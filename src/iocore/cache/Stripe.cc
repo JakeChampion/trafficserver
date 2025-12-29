@@ -402,3 +402,179 @@ Stripe::copy_from_aggregate_write_buffer(char *dest, Dir const &dir, size_t nbyt
   this->_write_buffer.copy_from(dest, agg_offset, nbytes);
   return true;
 }
+
+////
+// Cache Group Index Implementation
+//
+
+void
+Stripe::group_index_add(const std::string &group, const CacheKey &key)
+{
+  // Add key to the group's set
+  m_group_index[group].insert(key);
+
+  // Add group to the key's reverse mapping
+  m_key_to_groups[key].insert(group);
+}
+
+void
+Stripe::group_index_remove(const std::string &group, const CacheKey &key)
+{
+  // Remove key from the group's set
+  auto group_it = m_group_index.find(group);
+  if (group_it != m_group_index.end()) {
+    group_it->second.erase(key);
+    // Remove the group entry if it becomes empty
+    if (group_it->second.empty()) {
+      m_group_index.erase(group_it);
+    }
+  }
+
+  // Remove group from the key's reverse mapping
+  auto key_it = m_key_to_groups.find(key);
+  if (key_it != m_key_to_groups.end()) {
+    key_it->second.erase(group);
+    // Remove the key entry if it has no more groups
+    if (key_it->second.empty()) {
+      m_key_to_groups.erase(key_it);
+    }
+  }
+}
+
+void
+Stripe::group_index_remove_key(const CacheKey &key)
+{
+  // Find all groups this key belongs to
+  auto key_it = m_key_to_groups.find(key);
+  if (key_it == m_key_to_groups.end()) {
+    return; // Key is not in any group
+  }
+
+  // Remove the key from each group
+  for (const auto &group : key_it->second) {
+    auto group_it = m_group_index.find(group);
+    if (group_it != m_group_index.end()) {
+      group_it->second.erase(key);
+      // Remove the group entry if it becomes empty
+      if (group_it->second.empty()) {
+        m_group_index.erase(group_it);
+      }
+    }
+  }
+
+  // Remove the key's reverse mapping entry
+  m_key_to_groups.erase(key_it);
+}
+
+std::vector<CacheKey>
+Stripe::group_index_get_members(const std::string &group) const
+{
+  std::vector<CacheKey> result;
+
+  auto it = m_group_index.find(group);
+  if (it != m_group_index.end()) {
+    result.reserve(it->second.size());
+    for (const auto &key : it->second) {
+      result.push_back(key);
+    }
+  }
+
+  return result;
+}
+
+void
+Stripe::queue_invalidation(InvalidationWork &&work)
+{
+  m_invalidation_queue.push(std::move(work));
+}
+
+bool
+Stripe::has_pending_invalidations() const
+{
+  return !m_invalidation_queue.empty();
+}
+
+InvalidationWork
+Stripe::pop_invalidation()
+{
+  InvalidationWork work = std::move(m_invalidation_queue.front());
+  m_invalidation_queue.pop();
+  return work;
+}
+
+bool
+Stripe::group_index_empty() const
+{
+  return m_group_index.empty();
+}
+
+std::vector<std::string>
+Stripe::group_index_get_groups() const
+{
+  std::vector<std::string> result;
+  result.reserve(m_group_index.size());
+  for (const auto &[group, keys] : m_group_index) {
+    result.push_back(group);
+  }
+  return result;
+}
+
+size_t
+Stripe::group_index_remove_group(const std::string &group)
+{
+  auto it = m_group_index.find(group);
+  if (it == m_group_index.end()) {
+    return 0;
+  }
+
+  size_t keys_removed = it->second.size();
+
+  // Remove group from all keys' reverse mappings
+  for (const auto &key : it->second) {
+    auto key_it = m_key_to_groups.find(key);
+    if (key_it != m_key_to_groups.end()) {
+      key_it->second.erase(group);
+      if (key_it->second.empty()) {
+        m_key_to_groups.erase(key_it);
+      }
+    }
+  }
+
+  // Remove the group from the index
+  m_group_index.erase(it);
+
+  return keys_removed;
+}
+
+size_t
+Stripe::group_index_cleanup(const std::string &group)
+{
+  auto it = m_group_index.find(group);
+  if (it == m_group_index.end()) {
+    return 0;
+  }
+
+  size_t original_size = it->second.size();
+
+  // Remove keys that no longer exist in the directory
+  // Note: We cast to StripeSM* because group_index_cleanup is only called
+  // on StripeSM objects (via CacheGroupGC), and directory.probe requires StripeSM*.
+  std::erase_if(it->second, [this, &group](const CacheKey &key) {
+    Dir  result;
+    Dir *last_collision = nullptr;
+    bool exists = this->directory.probe(&key, static_cast<StripeSM *>(const_cast<Stripe *>(this)), &result, &last_collision) != 0;
+    if (!exists) {
+      // Also remove from key's reverse mapping
+      auto key_it = m_key_to_groups.find(key);
+      if (key_it != m_key_to_groups.end()) {
+        key_it->second.erase(group);
+        if (key_it->second.empty()) {
+          m_key_to_groups.erase(key_it);
+        }
+      }
+    }
+    return !exists;
+  });
+
+  return original_size - it->second.size();
+}

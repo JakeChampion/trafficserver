@@ -34,6 +34,7 @@ namespace
 
 DbgCtl dbg_ctl_cache_update{"cache_update"};
 DbgCtl dbg_ctl_cache_update_alt{"cache_update_alt"};
+DbgCtl dbg_ctl_cache_groups{"cache_groups"};
 
 #ifdef DEBUG
 
@@ -358,6 +359,24 @@ CacheVC::openWriteCloseHeadDone(int event, Event *e)
         }
         dir_assign(&od->single_doc_dir, &dir);
         dir_set_tag(&od->single_doc_dir, od->single_doc_key.slice32(2));
+      }
+
+      // RFC 9875: Update the cache group index with groups from this response
+      // Note: cache_config_groups_enabled may not be set correctly at init time,
+      // so we also check the config directly
+      int groups_enabled = cache_config_groups_enabled;
+      if (groups_enabled == 0) {
+        // Fall back to reading config directly
+        groups_enabled = RecGetRecordInt("proxy.config.cache.groups.enabled").value_or(0);
+      }
+      if (groups_enabled && frag_type == CACHE_FRAG_TYPE_HTTP && alternate.valid()) {
+        const auto &groups = alternate.cache_groups_get();
+        if (!groups.empty()) {
+          Dbg(dbg_ctl_cache_groups, "adding %zu group(s) to index for key %X", groups.size(), first_key.slice32(0));
+          for (const auto &group : groups) {
+            stripe->group_index_add(group, first_key);
+          }
+        }
       }
     }
   }

@@ -23,6 +23,9 @@ add_library(
   CacheDisk.cc
   CacheDoc.cc
   CacheEvacuateDocVC.cc
+  CacheGroupGC.cc
+  CacheGroupIndex.cc
+  CacheGroupInvalidation.cc
   CacheHosting.cc
   CacheHttp.cc
   CacheProcessor.cc

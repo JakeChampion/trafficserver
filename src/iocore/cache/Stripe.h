@@ -28,6 +28,7 @@
 #include "P_CacheDisk.h"
 #include "P_CacheStats.h"
 
+#include "iocore/cache/CacheDefs.h"
 #include "iocore/cache/Store.h"
 
 #include "tscore/ink_align.h"
@@ -35,6 +36,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <queue>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #define CACHE_BLOCK_SHIFT        9
 #define CACHE_BLOCK_SIZE         (1 << CACHE_BLOCK_SHIFT) // 512, smallest sector size
@@ -49,6 +55,37 @@
 
 // This is defined here so CacheVC can avoid including StripeSM.h.
 #define RECOVERY_SIZE EVACUATION_SIZE // 8MB
+
+// Forward declarations
+class Continuation;
+class CacheGroupGC;
+
+/**
+ * Hash function for CacheKey to enable use in std::unordered_set and std::unordered_map.
+ *
+ * Uses the fold() method of CryptoHash which XORs the hash components to produce
+ * a 64-bit value suitable for use as a hash.
+ */
+struct CacheKeyHash {
+  std::size_t
+  operator()(const CacheKey &key) const noexcept
+  {
+    return static_cast<std::size_t>(key.fold());
+  }
+};
+
+/**
+ * Work item for group-based cache invalidation.
+ *
+ * This structure represents a pending invalidation request for a cache group.
+ * The invalidation processor will iterate through all cache keys in the specified
+ * group and remove them from the cache.
+ */
+struct InvalidationWork {
+  std::string   group_name; ///< Name of the cache group to invalidate
+  std::string   origin;     ///< Origin server associated with the invalidation (for logging/filtering)
+  Continuation *cont;       ///< Continuation for completion callback (may be nullptr)
+};
 
 struct CacheVol {
   int          vol_number       = -1;
@@ -69,6 +106,8 @@ struct CacheVol {
 
 class Stripe
 {
+  friend class CacheGroupGC; ///< Allow CacheGroupGC to access protected members for index cleanup
+
 public:
   ats_scoped_str hash_text;
   int            frag_size{-1};
@@ -142,9 +181,134 @@ public:
    */
   bool copy_from_aggregate_write_buffer(char *dest, Dir const &dir, size_t nbytes) const;
 
+  // ==================== Cache Group Index Methods ====================
+  //
+  // These methods manage a per-stripe reverse index from cache group names
+  // to cache keys. This enables efficient group-based cache invalidation
+  // without scanning the entire cache directory.
+  //
+  // Thread Safety: The caller must hold the stripe's mutex before calling
+  // these methods, as the index is not internally synchronized.
+
+  /**
+   * Add a cache key to a group's index.
+   *
+   * Associates the given cache key with the specified group name. If the key
+   * is already in the group, this is a no-op.
+   *
+   * @param group The name of the cache group.
+   * @param key The cache key to add to the group.
+   */
+  void group_index_add(const std::string &group, const CacheKey &key);
+
+  /**
+   * Remove a cache key from a specific group's index.
+   *
+   * Removes the association between the cache key and the specified group.
+   * If the group becomes empty after removal, it is removed from the index.
+   *
+   * @param group The name of the cache group.
+   * @param key The cache key to remove from the group.
+   */
+  void group_index_remove(const std::string &group, const CacheKey &key);
+
+  /**
+   * Remove a cache key from all groups in the index.
+   *
+   * This should be called when a cache entry is evicted or explicitly removed
+   * to ensure the group index remains consistent.
+   *
+   * @param key The cache key to remove from all groups.
+   */
+  void group_index_remove_key(const CacheKey &key);
+
+  /**
+   * Get all cache keys that are members of a group.
+   *
+   * Returns a vector containing copies of all cache keys currently associated
+   * with the specified group. Returns an empty vector if the group does not
+   * exist or has no members.
+   *
+   * @param group The name of the cache group.
+   * @return A vector of cache keys in the group.
+   */
+  std::vector<CacheKey> group_index_get_members(const std::string &group) const;
+
+  /**
+   * Check if the group index is empty.
+   *
+   * @return true if no groups are indexed
+   */
+  bool group_index_empty() const;
+
+  /**
+   * Get the names of all groups in the index.
+   *
+   * @return A vector of group names
+   */
+  std::vector<std::string> group_index_get_groups() const;
+
+  /**
+   * Remove all entries for a group from the index.
+   *
+   * This removes the group entirely from the index, including all
+   * key associations.
+   *
+   * @param group The name of the cache group to remove.
+   * @return The number of keys that were in the group.
+   */
+  size_t group_index_remove_group(const std::string &group);
+
+  /**
+   * Clean up stale entries from a group.
+   *
+   * Removes keys from the group that no longer exist in the cache directory.
+   * If the group becomes empty, it is NOT removed (caller should call
+   * group_index_remove_group if desired).
+   *
+   * @param group The name of the cache group to clean.
+   * @return The number of keys removed.
+   */
+  size_t group_index_cleanup(const std::string &group);
+
+  /**
+   * Queue an invalidation work item for later processing.
+   *
+   * Adds an invalidation request to the stripe's invalidation queue. The
+   * invalidation will be processed asynchronously by the cache event loop.
+   *
+   * @param work The invalidation work item to queue.
+   */
+  void queue_invalidation(InvalidationWork &&work);
+
+  /**
+   * Check if there are pending invalidation work items.
+   *
+   * @return true if the invalidation queue is not empty.
+   */
+  bool has_pending_invalidations() const;
+
+  /**
+   * Retrieve and remove the next invalidation work item from the queue.
+   *
+   * @return The next InvalidationWork item. Behavior is undefined if the queue is empty.
+   */
+  InvalidationWork pop_invalidation();
+
 protected:
   off_t                data_blocks{};
   AggregateWriteBuffer _write_buffer;
+
+  // Cache Group Index: maps group name to set of cache keys belonging to that group.
+  // This reverse index enables efficient group-based cache invalidation.
+  std::unordered_map<std::string, std::unordered_set<CacheKey, CacheKeyHash>> m_group_index;
+
+  // Reverse mapping from cache key to the set of groups it belongs to.
+  // This enables efficient removal of a key from all groups during eviction.
+  std::unordered_map<CacheKey, std::unordered_set<std::string>, CacheKeyHash> m_key_to_groups;
+
+  // Queue of pending invalidation work items for this stripe.
+  std::queue<InvalidationWork> m_invalidation_queue;
 
   void _clear_init(std::uint32_t hw_sector_size);
   void _init_dir();
