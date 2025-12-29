@@ -85,6 +85,7 @@ struct Data {
   enum transform_state         state;
   int                          compression_type;
   int                          compression_algorithms;
+  bool                         compression_error; // Set when compression fails, triggers passthrough
 #if HAVE_BROTLI_ENCODE_H
   BrotliStream bstrm;
 #endif

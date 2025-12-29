@@ -64,6 +64,42 @@ DbgCtl dbg_ctl{TAG};
 namespace Compress
 {
 
+/**
+ * Thread Safety Model for Configuration
+ * =====================================
+ *
+ * The compress plugin supports hot configuration reloading without restart.
+ * This requires careful thread-safe handling of the global configuration.
+ *
+ * Key components:
+ * - cur_config: Pointer to the current active configuration (read by request threads)
+ * - prev_config: Pointer to the previous configuration (for deferred cleanup)
+ * - compress_config_mutex: Mutex protecting prev_config cleanup
+ *
+ * Configuration Reload Flow:
+ * 1. New configuration is parsed from file (Configuration::Parse)
+ * 2. Atomic swap: old = __sync_lock_test_and_set(&cur_config, newconfig)
+ *    - This is a full memory barrier ensuring visibility across threads
+ *    - Readers always get a valid configuration pointer (old or new)
+ * 3. Old config is moved to prev_config for deferred cleanup
+ *    - The mutex protects this transition to handle multiple rapid reloads
+ * 4. Previous prev_config is deleted under mutex protection
+ *
+ * Safety Guarantees:
+ * - Request threads reading cur_config always see a complete, valid configuration
+ * - No request will see a partially constructed configuration
+ * - Memory is not freed while any request might still be using it
+ *   (deferred by one reload cycle via prev_config)
+ *
+ * Trade-offs:
+ * - After a reload, the old configuration remains in memory until the next reload
+ * - This is acceptable for configuration objects which are relatively small
+ * - Readers do not need locks, so there is no contention on the hot path
+ *
+ * For remap plugin instances, each remap rule has its own Configuration object
+ * that is managed independently via TSRemapNewInstance/TSRemapDeleteInstance.
+ */
+
 const char *dictionary = nullptr;
 
 static const char *global_hidden_header_name = nullptr;
@@ -71,6 +107,7 @@ static const char *global_hidden_header_name = nullptr;
 static TSMutex compress_config_mutex = nullptr;
 
 // Current global configuration, and the previous one (for cleanup)
+// See "Thread Safety Model" comment above for details on how these are managed.
 Configuration *cur_config  = nullptr;
 Configuration *prev_config = nullptr;
 
@@ -144,6 +181,7 @@ data_alloc(int compression_type, int compression_algorithms, HostConfiguration *
   data->compression_type       = compression_type;
   data->compression_algorithms = compression_algorithms;
   data->hc                     = hc;
+  data->compression_error      = false;
 
   // Initialize algorithm-specific compression contexts
   if ((compression_type & (COMPRESSION_TYPE_GZIP | COMPRESSION_TYPE_DEFLATE)) &&
@@ -311,8 +349,73 @@ etag_header(TSMBuffer bufp, TSMLoc hdr_loc)
   return ret;
 }
 
-// FIXME: some things are potentially compressible. those responses
-static void
+// Helper to map algorithm enum to compression type
+static int
+algorithm_to_compression_type(int algorithm)
+{
+  switch (algorithm) {
+  case ALGORITHM_ZSTD:
+    return COMPRESSION_TYPE_ZSTD;
+  case ALGORITHM_BROTLI:
+    return COMPRESSION_TYPE_BROTLI;
+  case ALGORITHM_GZIP:
+    return COMPRESSION_TYPE_GZIP;
+  case ALGORITHM_DEFLATE:
+    return COMPRESSION_TYPE_DEFLATE;
+  default:
+    return COMPRESSION_TYPE_DEFAULT;
+  }
+}
+
+// Try to initialize compression for a specific algorithm.
+// Returns true if initialization succeeded, false otherwise.
+static bool
+try_init_algorithm(Data *data, int algorithm)
+{
+  int compression_type = algorithm_to_compression_type(algorithm);
+
+  // Check if client accepts this algorithm and server supports it
+  if (!(data->compression_type & compression_type) || !(data->compression_algorithms & algorithm)) {
+    return false;
+  }
+
+  switch (algorithm) {
+#if HAVE_ZSTD_H
+  case ALGORITHM_ZSTD:
+    if (Zstd::transform_init(data)) {
+      debug("Successfully initialized Zstandard compression");
+      return true;
+    }
+    error("Failed to configure Zstandard compression context");
+    break;
+#endif
+#if HAVE_BROTLI_ENCODE_H
+  case ALGORITHM_BROTLI:
+    if (Brotli::transform_init(data)) {
+      debug("Successfully initialized Brotli compression");
+      return true;
+    }
+    error("Failed to configure Brotli compression context");
+    break;
+#endif
+  case ALGORITHM_GZIP:
+  case ALGORITHM_DEFLATE:
+    if (Gzip::transform_init(data)) {
+      debug("Successfully initialized gzip/deflate compression");
+      return true;
+    }
+    error("Failed to configure gzip/deflate compression context");
+    break;
+  default:
+    break;
+  }
+
+  return false;
+}
+
+// Initialize the compression transform. Returns true on success, false on failure.
+// On failure, data->compression_error is set and the transform will pass through data uncompressed.
+static bool
 compress_transform_init(TSCont contp, Data *data)
 {
   // update the vary, content-encoding, and etag response headers
@@ -326,7 +429,33 @@ compress_transform_init(TSCont contp, Data *data)
 
   if (TSHttpTxnTransformRespGet(data->txn, &bufp, &hdr_loc) != TS_SUCCESS) {
     error("Error TSHttpTxnTransformRespGet");
-    return;
+    data->compression_error = true;
+    return false;
+  }
+
+  // Initialize the compression context based on the configured algorithm priority.
+  // Try each algorithm in priority order until one succeeds.
+  bool                    init_success = false;
+  const std::vector<int> &priority     = data->hc->algorithm_priority();
+
+  for (int algorithm : priority) {
+    if (try_init_algorithm(data, algorithm)) {
+      init_success = true;
+      break;
+    }
+  }
+
+  if (!init_success) {
+    // No compression algorithm could be initialized, set error and pass through
+    error("No compression algorithm could be initialized, passing through uncompressed");
+    data->compression_error = true;
+    TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+    // Still set up downstream for passthrough
+    downstream_conn         = TSTransformOutputVConnGet(contp);
+    data->downstream_buffer = TSIOBufferCreate();
+    data->downstream_reader = TSIOBufferReaderAlloc(data->downstream_buffer);
+    data->downstream_vio    = TSVConnWrite(downstream_conn, contp, data->downstream_reader, INT64_MAX);
+    return false;
   }
 
   if (content_encoding_header(bufp, hdr_loc, data->compression_type, data->compression_algorithms) == TS_SUCCESS &&
@@ -335,18 +464,27 @@ compress_transform_init(TSCont contp, Data *data)
     data->downstream_buffer = TSIOBufferCreate();
     data->downstream_reader = TSIOBufferReaderAlloc(data->downstream_buffer);
     data->downstream_vio    = TSVConnWrite(downstream_conn, contp, data->downstream_reader, INT64_MAX);
+  } else {
+    error("Failed to set content-encoding or etag headers");
+    data->compression_error = true;
+    TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+    return false;
   }
-
-#if HAVE_ZSTD_H
-  if (data->compression_type & COMPRESSION_TYPE_ZSTD && (data->compression_algorithms & ALGORITHM_ZSTD)) {
-    if (!Zstd::transform_init(data)) {
-      error("Failed to configure Zstandard compression context");
-      return;
-    }
-  }
-#endif
 
   TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
+  return true;
+}
+
+// Helper function to pass through data without compression
+static void
+passthrough_data(Data *data, const char *upstream_buffer, int64_t upstream_length)
+{
+  int64_t written = TSIOBufferWrite(data->downstream_buffer, upstream_buffer, upstream_length);
+  if (written == TS_ERROR || written != upstream_length) {
+    error("Failed to copy upstream data to downstream buffer");
+    return;
+  }
+  data->downstream_length += written;
 }
 
 static void
@@ -371,6 +509,14 @@ compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int amount)
       upstream_length = amount;
     }
 
+    // If compression error occurred, pass through data uncompressed
+    if (data->compression_error) {
+      passthrough_data(data, upstream_buffer, upstream_length);
+      TSIOBufferReaderConsume(upstream_reader, upstream_length);
+      amount -= upstream_length;
+      continue;
+    }
+
 #if HAVE_ZSTD_H
     if (data->compression_type & COMPRESSION_TYPE_ZSTD && (data->compression_algorithms & ALGORITHM_ZSTD)) {
       Zstd::transform_one(data, upstream_buffer, upstream_length);
@@ -386,12 +532,7 @@ compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int amount)
       Gzip::transform_one(data, upstream_buffer, upstream_length);
     } else {
       warning("No compression supported. Passing data through without transformation.");
-      int64_t written = TSIOBufferWrite(data->downstream_buffer, upstream_buffer, upstream_length);
-      if (written == TS_ERROR || written != upstream_length) {
-        error("Failed to copy upstream data to downstream buffer");
-        return;
-      }
-      data->downstream_length += written;
+      passthrough_data(data, upstream_buffer, upstream_length);
     }
 
     TSIOBufferReaderConsume(upstream_reader, upstream_length);
@@ -402,6 +543,12 @@ compress_transform_one(Data *data, TSIOBufferReader upstream_reader, int amount)
 static void
 compress_transform_finish(Data *data)
 {
+  // If compression error occurred, we were passing through uncompressed data
+  if (data->compression_error) {
+    debug("compress_transform_finish: passthrough mode due to compression error");
+    return;
+  }
+
 #if HAVE_ZSTD_H
   if (data->compression_type & COMPRESSION_TYPE_ZSTD && data->compression_algorithms & ALGORITHM_ZSTD) {
     Zstd::transform_finish(data);
@@ -564,7 +711,7 @@ is_content_compressible(TSHttpTxn txnp, bool server, HostConfiguration *host_con
   }
 
   if (TS_SUCCESS != TSHttpTxnClientReqGet(txnp, &cbuf, &chdr)) {
-    info("cound not get client request");
+    info("could not get client request");
     TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
     return 0;
   }
@@ -658,7 +805,7 @@ client_accepts_compression(TSHttpTxn txnp, bool server, HostConfiguration *host_
   }
 
   if (TS_SUCCESS != TSHttpTxnClientReqGet(txnp, &cbuf, &chdr)) {
-    info("cound not get client request");
+    info("could not get client request");
     TSHandleMLocRelease(bufp, TS_NULL_MLOC, hdr_loc);
     return 0;
   }
