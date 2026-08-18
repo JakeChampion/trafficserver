@@ -246,6 +246,7 @@ struct HttpStatsBlock {
   Metrics::Counter::AtomicType *proxy_loop_detected;
   Metrics::Counter::AtomicType *proxy_mh_loop_detected;
   Metrics::Counter::AtomicType *purge_requests;
+  Metrics::Counter::AtomicType *query_requests;
   Metrics::Counter::AtomicType *push_requests;
   Metrics::Counter::AtomicType *pushed_document_total_size;
   Metrics::Counter::AtomicType *pushed_response_header_total_size;
@@ -644,6 +645,13 @@ struct OverridableHttpConfigParams {
   MgmtByte post_check_content_length_enabled = 1;
 
   MgmtByte cache_post_method = 0;
+
+  //////////////////////////////////////////////////////////////
+  // Cache responses to the QUERY method. The request content  //
+  // is folded into the cache key, so this requires buffering  //
+  // the full request body before the cache lookup.            //
+  //////////////////////////////////////////////////////////////
+  MgmtByte cache_query_method = 0;
 
   ////////////////////////////////////////////////
   // Buffer post body before connecting servers //

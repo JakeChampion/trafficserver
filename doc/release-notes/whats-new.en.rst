@@ -35,6 +35,7 @@ Metrics
 * Added ``proxy.process.ssl.group.user_agent.P-224``
 * Added ``proxy.process.ssl.group.user_agent.X448``
 * Added ``proxy.process.ssl.group.user_agent.X25519MLKEM768``
+* Added ``proxy.process.http.query_requests``
 
 Plugins
 -------
@@ -107,6 +108,12 @@ Features
 * Add an optional ``avg_obj_size`` to ``storage.yaml`` to control the directory
   entry sizing.
 * The ``proxy.config.http.cache.post_method`` is now an overridable config.
+* Added support for the HTTP ``QUERY`` method
+  (draft-ietf-httpbis-safe-method-w-body). ``QUERY`` is recognized as a
+  well-known method, so it can be named in :file:`ip_allow.yaml` and
+  :file:`remap.config` ACLs, and it is exposed to plugins as
+  ``TS_HTTP_METHOD_QUERY``. Caching of ``QUERY`` responses is off by default
+  and enabled with :ts:cv:`proxy.config.http.cache.query_method`.
 * Defer deleting the copied plugin shared object file to startup to make it
   easier to debug crashes in plugins.
 
@@ -116,6 +123,8 @@ Configuration
 
 * Added :ts:cv:`proxy.config.http.negative_revalidating_list` to configure the
   list of status codes that apply to the negative revalidating feature
+* Added :ts:cv:`proxy.config.http.cache.query_method` to enable caching of
+  responses to the HTTP ``QUERY`` method
 * :ts:cv:`proxy.config.http.cache.targeted_cache_control_headers` now defaults
   to ``CDN-Cache-Control``. Set it to an empty string to disable targeted cache
   control.

@@ -908,7 +908,7 @@ inline static bool
 does_method_effect_cache(int method)
 {
   return ((method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_DELETE || method == HTTP_WKSIDX_PURGE || method == HTTP_WKSIDX_PUT ||
-           method == HTTP_WKSIDX_POST));
+           method == HTTP_WKSIDX_POST || method == HTTP_WKSIDX_QUERY));
 }
 
 inline static HttpTransact::StateMachineAction_t
@@ -1689,7 +1689,11 @@ HttpTransact::HandleRequest(State *s)
         }
       }
     }
-    if (s->txn_conf->request_buffer_enabled && s->http_config_param->post_copy_size > 0 &&
+    // Caching QUERY requires the request content, since it is part of the cache
+    // key. Buffer the whole body up front so the key is known before the lookup.
+    bool const buffer_for_query_cache_key = s->txn_conf->cache_query_method == 1 && s->method == HTTP_WKSIDX_QUERY;
+
+    if ((s->txn_conf->request_buffer_enabled || buffer_for_query_cache_key) && s->http_config_param->post_copy_size > 0 &&
         s->state_machine->get_ua_txn()->has_request_body(s->hdr_info.request_content_length,
                                                          s->client_info.transfer_encoding == TransferEncoding_t::CHUNKED)) {
       TRANSACT_RETURN(StateMachineAction_t::WAIT_FOR_FULL_BODY, nullptr);
@@ -2171,13 +2175,14 @@ HttpTransact::OSDNSLookup(State *s)
       } else if (s->cache_lookup_result == CacheLookupResult_t::MISS || s->cache_info.action == CacheAction_t::NO_ACTION) {
         TRANSACT_RETURN(StateMachineAction_t::API_OS_DNS, HandleCacheOpenReadMiss);
         // DNS lookup is done if the lookup failed and need to call Handle Cache Open Read Miss
-      } else if (s->cache_info.action == CacheAction_t::PREPARE_TO_WRITE && s->txn_conf->cache_post_method == 1 &&
-                 s->method == HTTP_WKSIDX_POST) {
+      } else if (s->cache_info.action == CacheAction_t::PREPARE_TO_WRITE &&
+                 ((s->txn_conf->cache_post_method == 1 && s->method == HTTP_WKSIDX_POST) ||
+                  (s->txn_conf->cache_query_method == 1 && s->method == HTTP_WKSIDX_QUERY))) {
         // By virtue of being here, we are intending to forward the request on
         // to the server. If we marked this as CacheAction_t::PREPARE_TO_WRITE and this
-        // is a POST request whose response we intend to write, then we have to
-        // proceed from here by calling the function that handles this as a
-        // miss.
+        // is a POST or QUERY request whose response we intend to write, then we
+        // have to proceed from here by calling the function that handles this
+        // as a miss.
         TRANSACT_RETURN(StateMachineAction_t::API_OS_DNS, HandleCacheOpenReadMiss);
       } else {
         build_error_response(s, HTTPStatus::INTERNAL_SERVER_ERROR, "Invalid Cache Lookup result", "default");
@@ -3181,7 +3186,7 @@ HttpTransact::build_response_from_cache(State *s, HTTPWarningCode warning_code)
   default:
     SET_VIA_STRING(VIA_DETAIL_CACHE_LOOKUP, VIA_DETAIL_HIT_SERVED);
     if (s->method == HTTP_WKSIDX_GET || (s->txn_conf->cache_post_method == 1 && s->method == HTTP_WKSIDX_POST) ||
-        s->api_resp_cacheable == true) {
+        (s->txn_conf->cache_query_method == 1 && s->method == HTTP_WKSIDX_QUERY) || s->api_resp_cacheable == true) {
       // send back the full document to the client.
       TxnDbg(dbg_ctl_http_trans, "Match! Serving full document.");
       s->cache_info.action = CacheAction_t::SERVE;
@@ -5799,9 +5804,9 @@ HttpTransact::check_request_validity(State *s, HTTPHdr *incoming_hdr)
       return RequestError_t::UNACCEPTABLE_TE_REQUIRED;
     }
 
-    // Require Content-Length/Transfer-Encoding for POST/PUSH/PUT
+    // Require Content-Length/Transfer-Encoding for POST/PUSH/PUT/QUERY
     if ((scheme == URL_WKSIDX_HTTP || scheme == URL_WKSIDX_HTTPS) &&
-        (method == HTTP_WKSIDX_POST || method == HTTP_WKSIDX_PUSH || method == HTTP_WKSIDX_PUT) &&
+        (method == HTTP_WKSIDX_POST || method == HTTP_WKSIDX_PUSH || method == HTTP_WKSIDX_PUT || method == HTTP_WKSIDX_QUERY) &&
         s->client_info.transfer_encoding != TransferEncoding_t::CHUNKED) {
       // In normal operation there will always be a get_ua_txn() at this point, but in one of the -R1  regression tests a request is
       // createdindependent of a transaction and this method is called, so we must null check
@@ -6184,6 +6189,8 @@ HttpTransact::update_method_stat(int method)
     Metrics::Counter::increment(http_rsb.delete_requests);
   } else if (method == HTTP_WKSIDX_PURGE) {
     Metrics::Counter::increment(http_rsb.purge_requests);
+  } else if (method == HTTP_WKSIDX_QUERY) {
+    Metrics::Counter::increment(http_rsb.query_requests);
   } else if (method == HTTP_WKSIDX_TRACE) {
     Metrics::Counter::increment(http_rsb.trace_requests);
   } else if (method == HTTP_WKSIDX_PUSH) {
@@ -6748,6 +6755,17 @@ HttpTransact::is_response_cacheable(State *s, HTTPHdr *request, HTTPHdr *respons
     }
   }
 
+  // A QUERY response is only cacheable with explicit freshness information,
+  // since heuristic freshness is not defined for it.
+  if (req_method == HTTP_WKSIDX_QUERY) {
+    if (s->cache_control.ttl_in_cache > 0) {
+      TxnDbg(dbg_ctl_http_trans, "QUERY method with a TTL");
+    } else {
+      TxnDbg(dbg_ctl_http_trans, "NO QUERY w/o Expires or CC");
+      return false;
+    }
+  }
+
   if ((response_code == HTTPStatus::OK) || (response_code == HTTPStatus::NOT_MODIFIED) ||
       (response_code == HTTPStatus::NON_AUTHORITATIVE_INFORMATION) || (response_code == HTTPStatus::NO_CONTENT) ||
       (response_code == HTTPStatus::MOVED_PERMANENTLY) || (response_code == HTTPStatus::PERMANENT_REDIRECT) ||
@@ -6907,10 +6925,15 @@ HttpTransact::is_request_valid(State *s, HTTPHdr *incoming_request)
 bool
 HttpTransact::is_request_retryable(State *s)
 {
+  // A QUERY is safe, but unlike the other safe methods it carries content. Once
+  // the request has gone out we can only replay it if that content was
+  // buffered.
+  bool const content_is_replayable = s->method != HTTP_WKSIDX_QUERY || s->state_machine->is_buffering_request_body;
+
   // If safe requests are  retryable, it should be safe to retry safe requests irrespective of bytes sent or connection state
   // according to RFC the following methods are safe (https://tools.ietf.org/html/rfc7231#section-4.2.1)
   // Otherwise, if there was no error establishing the connection (and we sent bytes)-- we cannot retry
-  if (!HttpTransactHeaders::is_method_safe(s->method) && s->current.state != CONNECTION_ERROR &&
+  if ((!HttpTransactHeaders::is_method_safe(s->method) || !content_is_replayable) && s->current.state != CONNECTION_ERROR &&
       s->state_machine->server_request_hdr_bytes > 0) {
     return false;
   }

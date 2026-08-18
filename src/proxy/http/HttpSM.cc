@@ -784,7 +784,8 @@ HttpSM::state_read_client_request_header(int event, void *data)
 
     if (t_state.hdr_info.client_request.version_get() == HTTP_1_1 &&
         (t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_POST ||
-         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_PUT)) {
+         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_PUT ||
+         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_QUERY)) {
       auto expect{t_state.hdr_info.client_request.value_get(static_cast<std::string_view>(MIME_FIELD_EXPECT))};
       if (ts::iequals(expect, static_cast<std::string_view>(HTTP_VALUE_100_CONTINUE))) {
         // When receive an "Expect: 100-continue" request from client, ATS sends a "100 Continue" response to client
@@ -886,6 +887,52 @@ HttpSM::wait_for_full_body()
   _ua.get_entry()->in_tunnel = true;
   _ua.get_txn()->set_inactivity_timeout(HRTIME_SECONDS(t_state.txn_conf->transaction_no_activity_timeout_in));
   tunnel.tunnel_run(p);
+}
+
+// The content of a QUERY request is part of the resource it identifies, so it
+// has to take part in the cache key. The full body has been buffered by
+// wait_for_full_body() at this point, so digest it and hand the digest to
+// generate_cache_key().
+void
+HttpSM::compute_request_body_digest()
+{
+  t_state.cache_info.request_body_digest_valid = false;
+
+  if (t_state.method != HTTP_WKSIDX_QUERY || t_state.txn_conf->cache_query_method != 1 || !this->_postbuf.is_valid()) {
+    return;
+  }
+
+  CryptoContext   ctx;
+  IOBufferReader *reader = this->get_postbuf_clone_reader();
+
+  for (int64_t avail = reader->block_read_avail(); avail > 0; avail = reader->block_read_avail()) {
+    ctx.update(reader->start(), static_cast<int>(avail));
+    reader->consume(avail);
+  }
+  reader->dealloc();
+
+  ctx.finalize(t_state.cache_info.request_body_digest);
+  t_state.cache_info.request_body_digest_valid = true;
+
+  SMDbg(dbg_ctl_http_cache_write, "request body digest folded into the cache key");
+}
+
+void
+HttpSM::generate_cache_key(HttpCacheKey *key, URL *url, bool compat)
+{
+  if (compat) {
+    Cache::generate_key92(key, url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
+  } else {
+    Cache::generate_key(key, url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
+  }
+
+  if (t_state.cache_info.request_body_digest_valid) {
+    CryptoContext ctx;
+
+    ctx.update(key->hash.u8, sizeof(key->hash.u8));
+    ctx.update(t_state.cache_info.request_body_digest.u8, sizeof(t_state.cache_info.request_body_digest.u8));
+    ctx.finalize(key->hash);
+  }
 }
 
 int
@@ -3036,6 +3083,7 @@ HttpSM::tunnel_handler_post(int event, void *data)
       is_buffering_request_body = true;
       client_request_body_bytes = this->postbuf_buffer_avail();
 
+      compute_request_body_digest();
       call_transact_and_set_next_state(HttpTransact::HandleRequestBufferDone);
       break;
     }
@@ -5327,11 +5375,7 @@ HttpSM::do_cache_lookup_and_read()
   SMDbg(dbg_ctl_http_seq, "Issuing cache lookup for URL %s", c_url->string_get(&t_state.arena));
 
   HttpCacheKey key;
-  if (compatibility_cache_lookup == CompatibilityCacheLookup::COMPAT_CACHE_LOOKUP_92) {
-    Cache::generate_key92(&key, c_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
-  } else {
-    Cache::generate_key(&key, c_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
-  }
+  generate_cache_key(&key, c_url, compatibility_cache_lookup == CompatibilityCacheLookup::COMPAT_CACHE_LOOKUP_92);
 
   t_state.hdr_info.cache_request.copy(&t_state.hdr_info.client_request);
   HttpTransactHeaders::normalize_accept_encoding(t_state.txn_conf, &t_state.hdr_info.cache_request);
@@ -5358,8 +5402,7 @@ HttpSM::do_cache_delete_all_alts()
   SMDbg(dbg_ctl_http_seq, "Issuing cache delete for %s", t_state.cache_info.lookup_url->string_get_ref());
 
   HttpCacheKey key;
-  Cache::generate_key(&key, t_state.cache_info.lookup_url, t_state.txn_conf->cache_ignore_query,
-                      t_state.txn_conf->cache_generation_number);
+  generate_cache_key(&key, t_state.cache_info.lookup_url);
   cacheProcessor.remove(nullptr, &key);
 }
 
@@ -5436,7 +5479,7 @@ HttpSM::do_cache_prepare_action(HttpCacheSM *c_sm, CacheHTTPInfo *object_read_in
   SMDbg(dbg_ctl_http_cache_write, "writing to cache with URL %s", s_url->string_get(&t_state.arena));
 
   HttpCacheKey key;
-  Cache::generate_key(&key, s_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
+  generate_cache_key(&key, s_url);
 
   pending_action =
     c_sm->open_write(&key, s_url, &t_state.hdr_info.cache_request, object_read_info,
@@ -5767,7 +5810,7 @@ HttpSM::do_http_server_open(bool raw, bool only_direct)
     will_be_private_ss = true;
   }
 
-  if (t_state.method == HTTP_WKSIDX_POST || t_state.method == HTTP_WKSIDX_PUT) {
+  if (t_state.method == HTTP_WKSIDX_POST || t_state.method == HTTP_WKSIDX_PUT || t_state.method == HTTP_WKSIDX_QUERY) {
     // don't share the session if keep-alive for post is not on
     if (t_state.txn_conf->keep_alive_post_out == 0) {
       SMDbg(dbg_ctl_http_ss, "Setting server session to private because of keep-alive post out");
