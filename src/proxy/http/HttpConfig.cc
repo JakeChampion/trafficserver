@@ -1002,6 +1002,7 @@ HttpConfig::startup()
   HttpEstablishStaticConfigLongLong(c.oride.flow_low_water_mark, "proxy.config.http.flow_control.low_water");
   HttpEstablishStaticConfigByte(c.oride.post_check_content_length_enabled, "proxy.config.http.post.check.content_length.enabled");
   HttpEstablishStaticConfigByte(c.oride.cache_post_method, "proxy.config.http.cache.post_method");
+  HttpEstablishStaticConfigByte(c.oride.cache_query_method, "proxy.config.http.cache.query_method");
   HttpEstablishStaticConfigByte(c.oride.request_buffer_enabled, "proxy.config.http.request_buffer_enabled");
   HttpEstablishStaticConfigByte(c.strict_uri_parsing, "proxy.config.http.strict_uri_parsing");
 
@@ -1319,6 +1320,7 @@ HttpConfig::reconfigure()
 
   params->oride.post_check_content_length_enabled = INT_TO_BOOL(m_master.oride.post_check_content_length_enabled);
   params->oride.cache_post_method                 = INT_TO_BOOL(m_master.oride.cache_post_method);
+  params->oride.cache_query_method                = INT_TO_BOOL(m_master.oride.cache_query_method);
 
   params->oride.request_buffer_enabled = INT_TO_BOOL(m_master.oride.request_buffer_enabled);
 
