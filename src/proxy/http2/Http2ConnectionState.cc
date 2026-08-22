@@ -156,7 +156,7 @@ Http2ConnectionState::rcv_data_frame(const Http2Frame &frame)
   if (frame.header().flags & HTTP2_FLAGS_DATA_PADDED) {
     frame.reader()->memcpy(&pad_length, HTTP2_DATA_PADLEN_LEN, nbytes);
     nbytes += HTTP2_DATA_PADLEN_LEN;
-    if (pad_length > payload_length) {
+    if (pad_length + HTTP2_DATA_PADLEN_LEN > payload_length) {
       // If the length of the padding is the length of the
       // frame payload or greater, the recipient MUST treat this as a
       // connection error of type PROTOCOL_ERROR.
