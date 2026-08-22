@@ -69,7 +69,7 @@ int            cplist_reconfigure();
 void           cplist_init();
 void           register_cache_stats(CacheStatsBlock *rsb, const std::string &prefix);
 static void    cplist_update();
-static int     create_volume(int volume_number, off_t size_in_blocks, CacheType scheme, CacheVol *cp);
+static int     create_volume(int volume_number, off_t size_in_blocks, CacheType scheme, CacheVol *cp, int &curr_vol);
 static int     fillExclusiveDisks(CacheVol *cp);
 static void    cplist_apply_config_settings(CacheVol *cp, const ConfigVol *config_vol);
 
@@ -837,6 +837,8 @@ int
 cplist_reconfigure()
 {
   gnstripes = 0;
+  // Round-robin disk cursor for create_volume(), reset each reconfiguration pass.
+  int curr_vol = 0;
   if (config_volumes.num_volumes == 0) {
     /* only the http cache */
     CacheVol *cp     = new CacheVol();
@@ -1006,7 +1008,7 @@ cplist_reconfigure()
         CacheVol *new_cp     = new CacheVol();
         new_cp->disk_stripes = static_cast<DiskStripe **>(ats_malloc(gndisks * sizeof(DiskStripe *)));
         memset(new_cp->disk_stripes, 0, gndisks * sizeof(DiskStripe *));
-        if (create_volume(config_vol->number, size_in_blocks, config_vol->scheme, new_cp)) {
+        if (create_volume(config_vol->number, size_in_blocks, config_vol->scheme, new_cp, curr_vol)) {
           ats_free(new_cp->disk_stripes);
           new_cp->disk_stripes = nullptr;
           delete new_cp;
@@ -1090,7 +1092,7 @@ cplist_reconfigure()
       }
 
       if (size_to_alloc) {
-        if (create_volume(volume_number, size_to_alloc, cp->scheme, cp)) {
+        if (create_volume(volume_number, size_to_alloc, cp->scheme, cp, curr_vol)) {
           return -1;
         }
       }
@@ -1329,13 +1331,17 @@ cplist_update()
 }
 
 // This is some really bad code, and needs to be rewritten!
+//
+// curr_vol is the round-robin disk cursor, threaded in from the caller so it is
+// shared across the volumes created in one configuration pass and reset to 0 at
+// the start of each (re)configuration, rather than persisting in a function-local
+// static across reconfigurations.
 int
-create_volume(int volume_number, off_t size_in_blocks, CacheType scheme, CacheVol *cp)
+create_volume(int volume_number, off_t size_in_blocks, CacheType scheme, CacheVol *cp, int &curr_vol)
 {
-  static int curr_vol       = 0; // FIXME: this will not reinitialize correctly
-  off_t      to_create      = size_in_blocks;
-  off_t      blocks_per_vol = STRIPE_BLOCK_SIZE >> STORE_BLOCK_SHIFT;
-  int        full_disks     = 0;
+  off_t to_create      = size_in_blocks;
+  off_t blocks_per_vol = STRIPE_BLOCK_SIZE >> STORE_BLOCK_SHIFT;
+  int   full_disks     = 0;
 
   cp->vol_number = volume_number;
   cp->scheme     = scheme;
