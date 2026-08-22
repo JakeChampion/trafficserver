@@ -250,7 +250,7 @@ vary_header(TSMBuffer bufp, TSMLoc hdr_loc)
     count = TSMimeHdrFieldValuesCount(bufp, hdr_loc, ce_loc);
     for (idx = 0; idx < count; idx++) {
       const char *value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, ce_loc, idx, &len);
-      if (len && strncasecmp("Accept-Encoding", value, len) == 0) {
+      if (len == TS_MIME_LEN_ACCEPT_ENCODING && strncasecmp(TS_MIME_FIELD_ACCEPT_ENCODING, value, len) == 0) {
         // Bail, Vary: Accept-Encoding already sent from origin
         TSHandleMLocRelease(bufp, hdr_loc, ce_loc);
         return TS_SUCCESS;
@@ -771,21 +771,18 @@ transformable(TSHttpTxn txnp, bool server, HostConfiguration *host_configuration
   return client_accepts_compression(txnp, server, host_configuration, compress_type, algorithms);
 }
 
+// Add Vary to the origin response, which is the copy that gets cached.  There is
+// no equivalent for a cache hit: TSHttpTxnCachedRespGet hands back the cached
+// object's own header heap, which is not writeable, so every field call on it
+// fails.  The response the client receives is covered by SEND_RESPONSE_HDR.
 static void
-add_vary_header_for_compressible_content(TSHttpTxn txnp, bool server, HostConfiguration * /* hc ATS_UNUSED */)
+add_vary_header_to_origin_response(TSHttpTxn txnp)
 {
   TSMBuffer resp_buf;
   TSMLoc    resp_loc;
 
-  // Get the response headers
-  if (server) {
-    if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
-  } else {
-    if (TS_SUCCESS != TSHttpTxnCachedRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
+  if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
+    return;
   }
 
   // Add Vary: Accept-Encoding header
@@ -824,7 +821,7 @@ compress_transform_add(TSHttpTxn txnp, HostConfiguration *hc, int compress_type,
 }
 
 static void
-handle_compression_and_vary(TSHttpTxn txnp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
+handle_compression_and_vary(TSHttpTxn txnp, TSCont contp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
 {
   // Check if content is compressible and add compression if client accepts it
   bool content_is_compressible;
@@ -834,7 +831,13 @@ handle_compression_and_vary(TSHttpTxn txnp, bool server, HostConfiguration *hc, 
 
   // Add Vary: Accept-Encoding for all compressible content to ensure proper HTTP caching
   if (content_is_compressible) {
-    add_vary_header_for_compressible_content(txnp, server, hc);
+    if (server) {
+      add_vary_header_to_origin_response(txnp);
+    }
+    // Whatever the response was built from, the copy the client receives is the
+    // one a downstream cache stores, so it is the one that has to say what it
+    // varies on.  TSHttpTxnHookAdd ignores a continuation already on the list.
+    TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, contp);
   }
 }
 
@@ -882,7 +885,7 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
         }
       }
 
-      handle_compression_and_vary(txnp, true, hc, &compress_type, &algorithms);
+      handle_compression_and_vary(txnp, contp, true, hc, &compress_type, &algorithms);
     }
     break;
 
@@ -908,12 +911,24 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
     if (TS_ERROR != TSHttpTxnCacheLookupStatusGet(txnp, &obj_status) && (TS_CACHE_LOOKUP_HIT_FRESH == obj_status)) {
       if (hc != nullptr) {
         info("handling compression of cached object");
-        handle_compression_and_vary(txnp, false, hc, &compress_type, &algorithms);
+        handle_compression_and_vary(txnp, contp, false, hc, &compress_type, &algorithms);
       }
     } else {
       // Prepare for going to origin
       info("preparing to go to origin");
       TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_REQUEST_HDR_HOOK, contp);
+    }
+  } break;
+
+  case TS_EVENT_HTTP_SEND_RESPONSE_HDR: {
+    TSMBuffer resp_buf;
+    TSMLoc    resp_loc;
+
+    if (TSHttpTxnClientRespGet(txnp, &resp_buf, &resp_loc) == TS_SUCCESS) {
+      if (vary_header(resp_buf, resp_loc) != TS_SUCCESS) {
+        error("failed to add the Vary header to the client response");
+      }
+      TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
     }
   } break;
 
