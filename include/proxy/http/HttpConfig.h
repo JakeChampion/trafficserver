@@ -250,6 +250,8 @@ struct HttpStatsBlock {
   Metrics::Counter::AtomicType *pushed_document_total_size;
   Metrics::Counter::AtomicType *pushed_response_header_total_size;
   Metrics::Counter::AtomicType *put_requests;
+  Metrics::Counter::AtomicType *query_requests;
+  Metrics::Counter::AtomicType *query_cache_bypass_body_too_large;
   Metrics::Counter::AtomicType *response_status_000_count;
   Metrics::Counter::AtomicType *response_status_100_count;
   Metrics::Counter::AtomicType *response_status_101_count;
@@ -644,6 +646,21 @@ struct OverridableHttpConfigParams {
   MgmtByte post_check_content_length_enabled = 1;
 
   MgmtByte cache_post_method = 0;
+
+  // Enable caching of QUERY responses (RFC 10008). The cache key for a QUERY
+  // incorporates the request content, so this requires buffering the body
+  // before the cache lookup.
+  MgmtByte cache_query_method = 0;
+
+  // Follow a 303 with a GET and no request content, as RFC 9110 section 15.4.4
+  // describes. QUERY is converted regardless of this setting; it only governs the
+  // other methods, where the previous behaviour was to replay method and content.
+  MgmtByte redirect_see_other_as_get = 1;
+
+  // Largest QUERY request body that will be buffered for cache key computation.
+  // A QUERY whose body exceeds this bypasses the cache entirely; the body is
+  // never truncated, because keying on a prefix would collide distinct queries.
+  MgmtInt cache_query_max_body_size = 65536;
 
   ////////////////////////////////////////////////
   // Buffer post body before connecting servers //

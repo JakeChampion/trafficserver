@@ -71,6 +71,13 @@ the methods defined in the HTTP 1.1 specification
 ``TS_HTTP_METHOD_PUSH``
    "PUSH"
 
+``TS_HTTP_METHOD_QUERY``
+   "QUERY"
+
+Each of these has a corresponding length constant, named by replacing
+``TS_HTTP_METHOD_`` with ``TS_HTTP_LEN_``; for example ``TS_HTTP_LEN_QUERY``
+is the length of the string ``TS_HTTP_METHOD_QUERY``.
+
 Traffic Server also defines several common values that appear in HTTP
 headers.
 

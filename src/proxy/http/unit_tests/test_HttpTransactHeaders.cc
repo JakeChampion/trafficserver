@@ -29,8 +29,10 @@ using namespace std::string_view_literals;
 #include "tsutil/PostScript.h"
 #include "tscore/ink_memory.h"
 
+#include "proxy/http/HttpConfig.h"
 #include "proxy/http/HttpTransactHeaders.h"
 #include "proxy/hdrs/HTTP.h"
+#include "proxy/hdrs/HdrToken.h"
 #include "proxy/hdrs/MIME.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -349,4 +351,140 @@ TEST_CASE("HttpTransactHeaders::copy_header_fields", "[http]")
     REQUIRE(pa != nullptr);
     CHECK(std::string_view{pa->value_get()} == "Basic realm=\"proxy\""sv);
   }
+}
+
+// RFC 10008 method classification. QUERY is safe and idempotent unconditionally,
+// but it only participates in the cache when proxy.config.http.cache.query_method
+// is on, because its cache key covers the request content and that content is
+// only buffered and digested on that path.
+TEST_CASE("HttpTransactHeaders QUERY method classification", "[http][query]")
+{
+  url_init();
+  mime_init();
+  http_init();
+
+  OverridableHttpConfigParams conf;
+
+  SECTION("QUERY is safe")
+  {
+    // RFC 10008 section 2: QUERY is both safe and idempotent.
+    CHECK(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_QUERY));
+
+    // The methods that were already safe stay safe, and the unsafe ones stay unsafe.
+    CHECK(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_GET));
+    CHECK(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_HEAD));
+    CHECK(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_OPTIONS));
+    CHECK(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_TRACE));
+    CHECK_FALSE(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_POST));
+    CHECK_FALSE(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_PUT));
+    CHECK_FALSE(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_DELETE));
+  }
+
+  SECTION("QUERY is idempotent")
+  {
+    CHECK(HttpTransactHeaders::is_method_idempotent(HTTP_WKSIDX_QUERY));
+
+    CHECK(HttpTransactHeaders::is_method_idempotent(HTTP_WKSIDX_GET));
+    CHECK(HttpTransactHeaders::is_method_idempotent(HTTP_WKSIDX_PUT));
+    CHECK_FALSE(HttpTransactHeaders::is_method_idempotent(HTTP_WKSIDX_POST));
+  }
+
+  SECTION("QUERY is cacheable only when cache_query_method is on")
+  {
+    conf.cache_query_method = 0;
+    CHECK_FALSE(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_QUERY));
+
+    conf.cache_query_method = 1;
+    CHECK(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_QUERY));
+
+    // Any value other than the explicit 1 leaves it off, matching cache_post_method.
+    conf.cache_query_method = 2;
+    CHECK_FALSE(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_QUERY));
+  }
+
+  SECTION("the QUERY switch does not disturb the other methods")
+  {
+    for (MgmtByte query_on : {MgmtByte{0}, MgmtByte{1}}) {
+      conf.cache_query_method = query_on;
+      conf.cache_post_method  = 0;
+
+      INFO("cache_query_method is " << static_cast<int>(query_on));
+      CHECK(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_GET));
+      CHECK(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_HEAD));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_POST));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_PUT));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_DELETE));
+
+      conf.cache_post_method = 1;
+      CHECK(HttpTransactHeaders::is_method_cacheable(&conf, HTTP_WKSIDX_POST));
+    }
+  }
+
+  SECTION("QUERY is cache lookupable only when cache_query_method is on")
+  {
+    // Without the digest there is no key to look up with, so a QUERY must not
+    // reach the cache at all rather than look up the bare URL key, which is the
+    // key some other request's response is stored under.
+    conf.cache_query_method = 0;
+    CHECK_FALSE(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_QUERY));
+
+    conf.cache_query_method = 1;
+    CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_QUERY));
+
+    conf.cache_query_method = 2;
+    CHECK_FALSE(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_QUERY));
+  }
+
+  SECTION("the methods that were already cache lookupable still are")
+  {
+    for (MgmtByte query_on : {MgmtByte{0}, MgmtByte{1}}) {
+      conf.cache_query_method = query_on;
+
+      INFO("cache_query_method is " << static_cast<int>(query_on));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_GET));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_HEAD));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_POST));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_DELETE));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_PUT));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_PURGE));
+      CHECK(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_PUSH));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_OPTIONS));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_TRACE));
+      CHECK_FALSE(HttpTransactHeaders::is_method_cache_lookupable(&conf, HTTP_WKSIDX_CONNECT));
+    }
+  }
+
+  // does_method_require_cache_copy_deletion() decides whether a method
+  // invalidates the cached copy of the URL. QUERY is safe, so it must never
+  // appear there; if it did, every QUERY would evict the GET response for the
+  // same URL. The function is `inline static` inside HttpTransact.cc and so is
+  // not linkable from a test. What is checkable from here is the property that
+  // keeps QUERY out of it: it is safe, and it is a distinct well known index
+  // from each of the methods that predicate does name.
+  SECTION("QUERY is not one of the cache invalidating methods")
+  {
+    REQUIRE(HttpTransactHeaders::is_method_safe(HTTP_WKSIDX_QUERY));
+
+    for (int invalidating : {HTTP_WKSIDX_DELETE, HTTP_WKSIDX_PURGE, HTTP_WKSIDX_PUT, HTTP_WKSIDX_POST}) {
+      INFO("invalidating method " << hdrtoken_index_to_wks(invalidating));
+      CHECK(HTTP_WKSIDX_QUERY != invalidating);
+      CHECK_FALSE(HttpTransactHeaders::is_method_safe(invalidating));
+    }
+  }
+}
+
+// QUERY must be in is_this_http_method_supported(). check_request_validity() feeds every
+// non-GET request through it, and a method it does not recognize yields METHOD_NOT_SUPPORTED,
+// which puts the transaction into ProxyMode_t::TUNNELLING. is_request_cache_lookupable()
+// returns false in that mode, so DecideCacheLookup() never runs and
+// proxy.config.http.cache.query_method would have no observable effect at all.
+TEST_CASE("QUERY is a supported HTTP method", "[http][query]")
+{
+  url_init();
+  mime_init();
+  http_init();
+
+  CHECK(HttpTransactHeaders::is_this_http_method_supported(HTTP_WKSIDX_QUERY));
+  CHECK(HttpTransactHeaders::is_this_method_supported(URL_WKSIDX_HTTP, HTTP_WKSIDX_QUERY));
+  CHECK(HttpTransactHeaders::is_this_method_supported(URL_WKSIDX_HTTPS, HTTP_WKSIDX_QUERY));
 }

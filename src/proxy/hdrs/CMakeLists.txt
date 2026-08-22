@@ -49,6 +49,7 @@ if(BUILD_TESTING)
     unit_tests/test_HdrUtils.cc
     unit_tests/test_HdrHeap.cc
     unit_tests/test_HeaderValidator.cc
+    unit_tests/test_HttpMethods.cc
     unit_tests/test_Huffmancode.cc
     unit_tests/test_mime.cc
     unit_tests/test_URL.cc

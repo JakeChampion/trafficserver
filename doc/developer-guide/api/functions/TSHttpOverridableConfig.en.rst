@@ -199,6 +199,9 @@ TSOverridableConfigKey Value                                               Confi
 :enumerator:`TS_CONFIG_BODY_FACTORY_RESPONSE_SUPPRESSION_MODE`           :ts:cv:`proxy.config.body_factory.response_suppression_mode`
 :enumerator:`TS_CONFIG_HTTP_CACHE_POST_METHOD`                           :ts:cv:`proxy.config.http.cache.post_method`
 :enumerator:`TS_CONFIG_HTTP_CACHE_TARGETED_CACHE_CONTROL_HEADERS`        :ts:cv:`proxy.config.http.cache.targeted_cache_control_headers`
+:enumerator:`TS_CONFIG_HTTP_CACHE_QUERY_METHOD`                          :ts:cv:`proxy.config.http.cache.query_method`
+:enumerator:`TS_CONFIG_HTTP_CACHE_QUERY_MAX_BODY_SIZE`                   :ts:cv:`proxy.config.http.cache.query_max_body_size`
+:enumerator:`TS_CONFIG_HTTP_REDIRECT_SEE_OTHER_AS_GET`                   :ts:cv:`proxy.config.http.redirect.see_other_as_get`
 ======================================================================== ====================================================================
 
 Examples

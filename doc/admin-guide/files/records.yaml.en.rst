@@ -1818,6 +1818,27 @@ HTTP Redirection
    This setting determines the maximum size in bytes of uploaded content to be
    buffered for HTTP methods such as POST and PUT.
 
+.. ts:cv:: CONFIG proxy.config.http.redirect.see_other_as_get INT 1
+   :reloadable:
+   :overridable:
+
+   When |TS| follows a ``303 (See Other)`` response, re-issue the request as a
+   ``GET`` with no content, as described in :rfc:`9110#section-15.4.4`. Every
+   other redirect status keeps the original method.
+
+   Set this to ``0`` to restore the earlier behaviour, in which a ``303`` was
+   followed with the original method and content like any other redirect. That
+   is a deviation from the specification and is offered only for deployments
+   that came to depend on it.
+
+   This has no effect unless redirection following is enabled with
+   :ts:cv:`proxy.config.http.number_of_redirections`, which is off by default.
+
+   ``QUERY`` is always followed with a ``GET`` regardless of this setting.
+   :rfc:`10008` section 2.5 requires it, and because ``QUERY`` support is new
+   there is no earlier behaviour to preserve. See
+   :ref:`http-proxy-caching-query`.
+
 .. ts:cv:: CONFIG proxy.config.http.redirect.actions STRING routable:follow
    :reloadable:
 
@@ -2491,6 +2512,60 @@ Cache Control
    :overridable:
 
    Enables (``1``) or disables (``0``) caching of HTTP POST requests.
+
+.. ts:cv:: CONFIG proxy.config.http.cache.query_method INT 0
+   :reloadable:
+   :overridable:
+
+   Enables (``1``) or disables (``0``) caching of responses to HTTP ``QUERY``
+   requests, as defined by :rfc:`10008`.
+
+   A ``QUERY`` carries its parameters in the request content rather than in the
+   URI, so :rfc:`10008` requires the cache key to incorporate that content.
+   |TS| therefore has to read and buffer the entire request body *before* it can
+   compute the cache key and perform the cache lookup, which costs memory and
+   adds latency to every ``QUERY`` transaction, whether or not it turns out to
+   be a cache hit.
+
+   Because of that cost this setting is deliberately disabled by default. Enable
+   it only for the traffic that actually benefits from cached ``QUERY``
+   responses; since the setting is overridable, it can be turned on for a single
+   :file:`remap.config` rule rather than for the whole proxy.
+
+   The size of the body that will be buffered is bounded by
+   :ts:cv:`proxy.config.http.cache.query_max_body_size`. See
+   :ref:`http-proxy-caching-query` for details on how the cache key is
+   computed and when a ``QUERY`` bypasses the cache.
+
+.. ts:cv:: CONFIG proxy.config.http.cache.query_max_body_size INT 65536
+   :reloadable:
+   :overridable:
+
+   The largest ``QUERY`` request body, in bytes, that |TS| will buffer in order
+   to compute a cache key. This is only consulted when
+   :ts:cv:`proxy.config.http.cache.query_method` is enabled.
+
+   The effective limit is the *lesser* of this value and
+   :ts:cv:`proxy.config.http.post_copy_size`, which bounds the buffer that
+   actually holds the body and defaults to 2048. Raising this setting alone
+   therefore has no effect; raise both. |TS| logs a warning at start up if this
+   value is the larger of the two. Note that the warning is based on the global
+   settings, so it will not appear when ``QUERY`` caching is enabled only for an
+   individual remap rule.
+
+   A ``QUERY`` whose request body is larger than the effective limit, or which
+   does not declare a ``Content-Length`` (a chunked body, or an HTTP/2 or HTTP/3
+   request that omits ``content-length``), or which has no body at all, bypasses
+   the cache entirely: it is proxied to the origin server and its response is
+   neither looked up nor stored. Requests that bypass the cache for exceeding the
+   size limit are counted by
+   :ts:stat:`proxy.process.http.query_cache_bypass_body_too_large`.
+
+   The body is never truncated for the purpose of computing the key. Keying a
+   ``QUERY`` on only a prefix of its content would make two distinct queries
+   that share that prefix collide on the same cache entry, and one user could
+   then be served the result of another user's query. Bypassing the cache is the
+   only safe response to a body that cannot be digested in full.
 
 .. ts:cv:: CONFIG proxy.config.http.cache.generation INT -1
    :reloadable:

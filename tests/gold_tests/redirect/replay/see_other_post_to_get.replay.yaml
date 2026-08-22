@@ -1,0 +1,83 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# A 303 on a POST is followed with a GET carrying no content, the default.
+#
+# Keyed on the URL rather than a uuid header: the request Traffic Server makes
+# when it follows a redirect carries the original request's headers, so a uuid
+# keyed rule would match the followed request against the rule that produced the
+# redirect. The client is given --keys "/start" so it sends only the first
+# transaction; the second is here so the origin has a rule for the request
+# Traffic Server generates, and its method is the assertion.
+#
+
+meta:
+  version: "1.0"
+
+sessions:
+- protocol:
+    stack: http
+  transactions:
+
+  - client-request:
+      method: "POST"
+      version: "1.1"
+      url: /start
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, text/plain ]
+        - [ Content-Length, 9 ]
+      content:
+        encoding: plain
+        data: "a=1&b=234"
+
+    server-response:
+      status: 303
+      reason: See Other
+      headers:
+        fields:
+        - [ Location, /target ]
+        - [ Content-Length, 0 ]
+
+    proxy-response:
+      status: 200
+
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /target
+      headers:
+        fields:
+        - [ Host, example.com ]
+
+    proxy-request:
+      method: "GET"
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 8 ]
+        - [ X-Followed, yes ]
+      content:
+        encoding: plain
+        data: "followed"
+
+    proxy-response:
+      status: 200

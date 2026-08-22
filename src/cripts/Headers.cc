@@ -40,6 +40,8 @@ namespace Method
   const cripts::Header::Method TRACE(TS_HTTP_METHOD_TRACE, TS_HTTP_LEN_TRACE);
   // This is a special feature of ATS
   const cripts::Header::Method PURGE(TS_HTTP_METHOD_PURGE, TS_HTTP_LEN_PURGE);
+  // RFC 10008
+  const cripts::Header::Method QUERY(TS_HTTP_METHOD_QUERY, TS_HTTP_LEN_QUERY);
 } // namespace Method
 
 Header::Status &

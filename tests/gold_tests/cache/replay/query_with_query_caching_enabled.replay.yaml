@@ -1,0 +1,548 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# Verify QUERY caching (RFC 10008) when proxy.config.http.cache.query_method is
+# enabled. RFC 10008 section 2.7 requires the request content to participate in
+# the cache key, so two QUERY requests for the same URI with different content
+# must address different cache entries.
+#
+# Every origin response carries a distinct X-Response value and every
+# proxy-response asserts that value with "as: equal". A cache key that failed to
+# separate two queries would therefore serve the wrong X-Response and fail the
+# test rather than silently pass.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify QUERY response caching when caching QUERY responses is enabled'
+
+  server:
+    name: 'server-query-enabled'
+
+  client:
+    name: 'client-query-enabled'
+
+  ats:
+    name: 'ts-cache-query'
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http.*|cache.*'
+      proxy.config.http.insert_age_in_response: 0
+      proxy.config.http.cache.query_method: 1
+
+    remap_config:
+      - from: /
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+
+sessions:
+- transactions:
+
+  #
+  # Test 1: The simple case. Two identical QUERY requests: the origin sees only
+  # the first one and the second is served out of the cache.
+  #
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /simple/query/test
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 11 ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "query-body-alpha", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, response_to_query ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: response_to_query, as: equal } ]
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /simple/query/test
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 12 ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      expect: absent
+
+    # The request should not go to the server, so this 500 response should not
+    # be served.
+    server-response:
+      status: 500
+      reason: Internal Server Error
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    # This should be served out of the cache.
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: response_to_query, as: equal } ]
+
+  #
+  # Test 2: The request content participates in the cache key. Two QUERY
+  # requests for the same URI whose content differs are distinct cache entries.
+  #
+
+  # Store an entry for the first body.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/body/is/part/of/the/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 4 ]
+        - [ uuid, 21 ]
+      content:
+        encoding: plain
+        data: "id=1"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "id=1", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, answer_for_id_1 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_id_1, as: equal } ]
+
+  # The same URI with different content must miss and reach the origin. Were the
+  # content left out of the cache key, ATS would serve answer_for_id_1 here and
+  # the X-Response assertion below would fail.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/body/is/part/of/the/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 4 ]
+        - [ uuid, 22 ]
+      content:
+        encoding: plain
+        data: "id=2"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "id=2", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, answer_for_id_2 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_id_2, as: equal } ]
+
+  # Repeat the first body. It must be served from its own cache entry, which
+  # proves the two bodies produced two independent entries rather than one
+  # entry that the second query overwrote.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/body/is/part/of/the/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 4 ]
+        - [ uuid, 23 ]
+      content:
+        encoding: plain
+        data: "id=1"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      expect: absent
+
+    server-response:
+      status: 500
+      reason: Internal Server Error
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_id_1, as: equal } ]
+
+  # Repeat the second body. It too must come from its own entry.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/body/is/part/of/the/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 4 ]
+        - [ uuid, 24 ]
+      content:
+        encoding: plain
+        data: "id=2"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      expect: absent
+
+    server-response:
+      status: 500
+      reason: Internal Server Error
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_id_2, as: equal } ]
+
+  #
+  # Test 3: Content-Type participates in the cache key. The URI and the content
+  # are identical here; only the media type differs.
+  #
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/content/type/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 17 ]
+        - [ uuid, 31 ]
+      content:
+        encoding: plain
+        data: "shared-query-body"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      headers:
+        fields:
+        - [ Content-Type, { value: application/sql, as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, answer_for_sql ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_sql, as: equal } ]
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/content/type/key
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/graphql ]
+        - [ Content-Length, 17 ]
+        - [ uuid, 32 ]
+      content:
+        encoding: plain
+        data: "shared-query-body"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      headers:
+        fields:
+        - [ Content-Type, { value: application/graphql, as: equal } ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, answer_for_graphql ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: answer_for_graphql, as: equal } ]
+
+  #
+  # Test 4a: A stored QUERY response must not be served to a GET for the same
+  # URI. Cross-method contamination would hand a client the answer to somebody
+  # else's query.
+  #
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/then/get
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 41 ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, query_response_for_query_then_get ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: query_response_for_query_then_get, as: equal } ]
+
+  # The GET must not be answered out of the QUERY's cache entry.
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /query/then/get
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ uuid, 42 ]
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "GET"
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, get_response_for_query_then_get ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: get_response_for_query_then_get, as: equal } ]
+
+  #
+  # Test 4b: The other direction. A stored GET response must not be served to a
+  # QUERY for the same URI.
+  #
+
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /get/then/query
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ uuid, 51 ]
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, get_response_for_get_then_query ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: get_response_for_get_then_query, as: equal } ]
+
+  # The QUERY must not be answered out of the GET's cache entry.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /get/then/query
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 52 ]
+      content:
+        encoding: plain
+        data: "query-body-bravo"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "query-body-bravo", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, query_response_for_get_then_query ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: query_response_for_get_then_query, as: equal } ]
+
+  # QUERY is a safe method (RFC 10008 section 2), so it must not have
+  # invalidated the stored GET response. That response is still served from the
+  # cache rather than via this 500.
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /get/then/query
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ uuid, 53 ]
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      expect: absent
+
+    server-response:
+      status: 500
+      reason: Internal Server Error
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: get_response_for_get_then_query, as: equal } ]

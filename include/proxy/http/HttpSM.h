@@ -337,6 +337,12 @@ public:
   bool            get_postbuf_done();
   bool            is_postbuf_valid();
 
+  // RFC 10008 QUERY caching. compute_query_content_digest() digests the buffered
+  // request content and its representation metadata once the body has been read;
+  // apply_query_cache_key() folds that digest into an already computed URL key.
+  void compute_query_content_digest();
+  void apply_query_cache_key(HttpCacheKey *key);
+
   // See if we should allow the transaction
   // based on sni and host name header values
   void           check_sni_host();

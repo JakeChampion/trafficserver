@@ -1,0 +1,219 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# Verify that a QUERY whose content is larger than
+# proxy.config.http.cache.query_max_body_size bypasses the cache entirely. Such
+# a request cannot be keyed on its content, and keying it on a truncated body
+# would let two distinct queries collide, so it is neither looked up nor stored.
+#
+# proxy.config.http.cache.query_max_body_size is set to 16 here so that the
+# oversize case can be exercised with a short body.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify a QUERY with an oversized body bypasses the cache'
+
+  server:
+    name: 'server-query-too-large'
+
+  client:
+    name: 'client-query-too-large'
+
+  ats:
+    name: 'ts-query-too-large'
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http.*|cache.*'
+      proxy.config.http.insert_age_in_response: 0
+      proxy.config.http.cache.query_method: 1
+      proxy.config.http.cache.query_max_body_size: 16
+
+    remap_config:
+      - from: /
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+
+    metric_checks:
+      - metric: proxy.process.http.query_requests
+        value: 4
+      - metric: proxy.process.http.query_cache_bypass_body_too_large
+        value: 2
+
+sessions:
+- transactions:
+
+  #
+  # Test 1: A body at the size limit is still cached. This is the control for
+  # the oversize case below: it shows that caching is on and that the limit is
+  # what makes the difference.
+  #
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/within/limit
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 11 ]
+      content:
+        encoding: plain
+        data: "small-query-body"
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "small-query-body", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, small_body_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: small_body_response, as: equal } ]
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/within/limit
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, 12 ]
+      content:
+        encoding: plain
+        data: "small-query-body"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      expect: absent
+
+    server-response:
+      status: 500
+      reason: Internal Server Error
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: small_body_response, as: equal } ]
+
+  #
+  # Test 2: A body over the limit bypasses the cache. Both requests reach the
+  # origin and each gets its own response.
+  #
+
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/over/limit
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 32 ]
+        - [ uuid, 21 ]
+      content:
+        encoding: plain
+        data: "this-query-body-is-way-too-long!"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "this-query-body-is-way-too-long!", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, first_large_body_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: first_large_body_response, as: equal } ]
+
+  # Nothing was stored for the previous transaction, so this identical QUERY
+  # must reach the origin too. The distinct X-Response proves that it did.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/over/limit
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 32 ]
+        - [ uuid, 22 ]
+      content:
+        encoding: plain
+        data: "this-query-body-is-way-too-long!"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "this-query-body-is-way-too-long!", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, second_large_body_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: second_large_body_response, as: equal } ]

@@ -202,6 +202,9 @@ static constexpr RecordElement RecordsConfig[] =
   ,
   {RECT_CONFIG, "proxy.config.http.post_copy_size", RECD_INT, "2048", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
   ,
+  {RECT_CONFIG, "proxy.config.http.redirect.see_other_as_get", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]",
+   RECA_NULL}
+  ,
   {RECT_CONFIG, "proxy.config.http.redirect.actions", RECD_STRING, "routable:follow", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
   ,
 
@@ -620,6 +623,11 @@ static constexpr RecordElement RecordsConfig[] =
   {RECT_CONFIG, "proxy.config.http.cache.ignore_query", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
   ,
   {RECT_CONFIG, "proxy.config.http.cache.post_method", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.query_method", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.query_max_body_size", RECD_INT, "65536", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-2147483647]",
+   RECA_NULL}
   ,
   {RECT_CONFIG, "proxy.config.http.cache.max_open_read_retries", RECD_INT, "-1", RECU_NULL, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
   ,

@@ -38,7 +38,11 @@ enum class CacheInitState : int {
 #define CACHE_ALT_REMOVED       -2
 
 static const uint8_t CACHE_DB_MAJOR_VERSION = 24;
-static const uint8_t CACHE_DB_MINOR_VERSION = 2;
+// 24.3 adds the QUERY method to the well known string table. That shifts the
+// indices of the header tokens stored after it, and those indices are persisted
+// verbatim in marshalled headers, so objects written by an older version must
+// have them recomputed on read (see CacheVC::load_http_info).
+static const uint8_t CACHE_DB_MINOR_VERSION = 3;
 // This is used in various comparisons because otherwise if the minor version is 0,
 // the compile fails because the condition is always true or false. Running it through
 // VersionNumber prevents that.
