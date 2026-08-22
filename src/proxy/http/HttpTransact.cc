@@ -908,7 +908,7 @@ inline static bool
 does_method_effect_cache(int method)
 {
   return ((method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_DELETE || method == HTTP_WKSIDX_PURGE || method == HTTP_WKSIDX_PUT ||
-           method == HTTP_WKSIDX_POST));
+           method == HTTP_WKSIDX_POST || method == HTTP_WKSIDX_QUERY));
 }
 
 inline static HttpTransact::StateMachineAction_t
@@ -1689,9 +1689,42 @@ HttpTransact::HandleRequest(State *s)
         }
       }
     }
-    if (s->txn_conf->request_buffer_enabled && s->http_config_param->post_copy_size > 0 &&
-        s->state_machine->get_ua_txn()->has_request_body(s->hdr_info.request_content_length,
-                                                         s->client_info.transfer_encoding == TransferEncoding_t::CHUNKED)) {
+    bool const is_chunked = s->client_info.transfer_encoding == TransferEncoding_t::CHUNKED;
+
+    // RFC 10008 section 2.7: the cache key for a QUERY incorporates the request
+    // content, so the body has to be buffered before the cache lookup can happen.
+    // Only a body whose length is known up front and fits the configured limit is
+    // buffered. Anything else (chunked, oversized, or absent) bypasses the cache:
+    // keying on a truncated body would make two distinct queries collide, which
+    // leaks one user's result to another.
+    bool buffer_query_body = false;
+
+    if (s->method == HTTP_WKSIDX_QUERY && s->txn_conf->cache_query_method == 1 && !s->query_content_digest_valid &&
+        !s->query_cache_bypass) {
+      // The tunnel that fills the buffer refuses a body larger than post_copy_size
+      // and errors the transaction rather than falling back, so the effective
+      // ceiling is the smaller of the two limits. Staying under it here keeps an
+      // oversized QUERY on the bypass path instead of failing the request.
+      int64_t const buffer_limit =
+        std::min(static_cast<int64_t>(s->txn_conf->cache_query_max_body_size), s->http_config_param->post_copy_size);
+
+      if (is_chunked || s->hdr_info.request_content_length <= 0) {
+        s->query_cache_bypass = true;
+        TxnDbg(dbg_ctl_http_trans, "QUERY body length is not known up front; bypassing cache");
+      } else if (s->hdr_info.request_content_length > buffer_limit) {
+        s->query_cache_bypass = true;
+        Metrics::Counter::increment(http_rsb.query_cache_bypass_body_too_large);
+        TxnDbg(dbg_ctl_http_trans,
+               "QUERY body of %" PRId64 " bytes exceeds the buffering limit of %" PRId64 " bytes"
+               " (the lesser of cache.query_max_body_size and post_copy_size); bypassing cache",
+               s->hdr_info.request_content_length, buffer_limit);
+      } else {
+        buffer_query_body = true;
+      }
+    }
+
+    if (((s->txn_conf->request_buffer_enabled && s->http_config_param->post_copy_size > 0) || buffer_query_body) &&
+        s->state_machine->get_ua_txn()->has_request_body(s->hdr_info.request_content_length, is_chunked)) {
       TRANSACT_RETURN(StateMachineAction_t::WAIT_FOR_FULL_BODY, nullptr);
     }
   }
@@ -3181,7 +3214,7 @@ HttpTransact::build_response_from_cache(State *s, HTTPWarningCode warning_code)
   default:
     SET_VIA_STRING(VIA_DETAIL_CACHE_LOOKUP, VIA_DETAIL_HIT_SERVED);
     if (s->method == HTTP_WKSIDX_GET || (s->txn_conf->cache_post_method == 1 && s->method == HTTP_WKSIDX_POST) ||
-        s->api_resp_cacheable == true) {
+        (s->txn_conf->cache_query_method == 1 && s->method == HTTP_WKSIDX_QUERY) || s->api_resp_cacheable == true) {
       // send back the full document to the client.
       TxnDbg(dbg_ctl_http_trans, "Match! Serving full document.");
       s->cache_info.action = CacheAction_t::SERVE;
@@ -6188,6 +6221,8 @@ HttpTransact::update_method_stat(int method)
     Metrics::Counter::increment(http_rsb.trace_requests);
   } else if (method == HTTP_WKSIDX_PUSH) {
     Metrics::Counter::increment(http_rsb.push_requests);
+  } else if (method == HTTP_WKSIDX_QUERY) {
+    Metrics::Counter::increment(http_rsb.query_requests);
   } else if (method == HTTP_WKSIDX_OPTIONS) {
     Metrics::Counter::increment(http_rsb.options_requests);
   } else {
@@ -6494,7 +6529,14 @@ HttpTransact::is_request_cache_lookupable(State *s)
     return false;
   }
   // GET, HEAD, POST, DELETE, and PUT are all cache lookupable
-  if (!HttpTransactHeaders::is_method_cache_lookupable(s->method) && s->api_req_cacheable == false) {
+  if (!HttpTransactHeaders::is_method_cache_lookupable(s->txn_conf, s->method) && s->api_req_cacheable == false) {
+    SET_VIA_STRING(VIA_DETAIL_TUNNEL, VIA_DETAIL_TUNNEL_METHOD);
+    return false;
+  }
+  // A QUERY can only be looked up once its content has been digested into the
+  // cache key. Without that digest the key would not distinguish two queries to
+  // the same URI, so bypass the cache entirely.
+  if (s->method == HTTP_WKSIDX_QUERY && (s->query_cache_bypass || !s->query_content_digest_valid)) {
     SET_VIA_STRING(VIA_DETAIL_TUNNEL, VIA_DETAIL_TUNNEL_METHOD);
     return false;
   }
@@ -6912,6 +6954,21 @@ HttpTransact::is_request_retryable(State *s)
   // Otherwise, if there was no error establishing the connection (and we sent bytes)-- we cannot retry
   if (!HttpTransactHeaders::is_method_safe(s->method) && s->current.state != CONNECTION_ERROR &&
       s->state_machine->server_request_hdr_bytes > 0) {
+    return false;
+  }
+
+  // The exemption above assumes a safe method has no content to resend. QUERY is
+  // safe but does carry content, and once that content has been read out of the
+  // client's reader it is gone unless it was buffered. Retrying then would resend
+  // the headers, advertising a Content-Length whose bytes no longer exist, and the
+  // origin would wait for a body that never arrives. Only retry while the content
+  // is still replayable.
+  // is_postbuf_valid() alone is not enough: the buffer is also initialised when
+  // redirection following is on, and in that case the body is still streamed from
+  // the client rather than replayed. This mirrors the condition that
+  // do_setup_client_request_body_tunnel() uses to pick its static producer.
+  if (s->method == HTTP_WKSIDX_QUERY && s->current.state != CONNECTION_ERROR && s->state_machine->server_request_hdr_bytes > 0 &&
+      !(s->state_machine->is_buffering_request_body && s->state_machine->is_postbuf_valid())) {
     return false;
   }
 

@@ -1,0 +1,188 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# Verify that a remap.config ACL filter accepts QUERY as a standard method name,
+# in both an allow rule and a deny rule.
+#
+# The first remap rule allows only GET and QUERY; the second denies only QUERY.
+# Each rule is exercised with a method it covers and with one it does not, so a
+# rule that failed to recognize QUERY and fell back to allowing or denying
+# everything would fail the test.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify remap.config ACL filters accept QUERY as a method name'
+
+  server:
+    name: 'server-remap-acl-query'
+
+  client:
+    name: 'client-remap-acl-query'
+
+  ats:
+    name: 'ts-remap-acl-query'
+    process_config:
+      enable_cache: false
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'url|remap|ip_allow|http'
+      proxy.config.url_remap.acl_behavior_policy: 1
+
+    # Under the modern ACL policy the legacy allow/deny actions are rejected, so
+    # a matching ip_allow.yaml is supplied. It permits everything, leaving the
+    # remap.config filters as the only thing under test.
+    ip_allow_yaml:
+      ip_allow:
+      - apply: in
+        ip_addrs: 0/0
+        action: set_allow
+        methods: ALL
+
+    remap_config:
+      - from: http://allow-query.example.com/
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+        options:
+          - '@action=set_allow'
+          - '@method=GET'
+          - '@method=QUERY'
+      - from: http://deny-query.example.com/
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+        options:
+          - '@action=set_deny'
+          - '@method=QUERY'
+
+sessions:
+- transactions:
+
+  # QUERY is in the rule's allow list, so it is proxied.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /remap_acl/allowed/query
+      headers:
+        fields:
+        - [ Host, allow-query.example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, remap-allow-query ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+    proxy-request:
+      method: "QUERY"
+      content:
+        verify: { value: "query-body-alpha", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ X-Response, remap_allowed_query ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: remap_allowed_query, as: equal } ]
+
+  # POST is not in that rule's allow list and is rejected.
+  - client-request:
+      method: "POST"
+      version: "1.1"
+      url: /remap_acl/allowed/post
+      headers:
+        fields:
+        - [ Host, allow-query.example.com ]
+        - [ Content-Length, 16 ]
+        - [ uuid, remap-allow-post ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+    proxy-request:
+      expect: absent
+
+    # Not received: ATS rejects the request itself.
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 403
+
+  # The second rule denies QUERY specifically.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /remap_acl/denied/query
+      headers:
+        fields:
+        - [ Host, deny-query.example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, remap-deny-query ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+    proxy-request:
+      expect: absent
+
+    # Not received: ATS rejects the request itself.
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 403
+
+  # Only QUERY is denied by that rule, so a GET for the same remap is proxied.
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /remap_acl/denied/get
+      headers:
+        fields:
+        - [ Host, deny-query.example.com ]
+        - [ uuid, remap-deny-get ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ X-Response, remap_allowed_get ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: remap_allowed_get, as: equal } ]

@@ -1,0 +1,138 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# Verify that a QUERY request (RFC 10008) is proxied like any other method when
+# QUERY caching is left at its default of disabled: the content reaches the
+# origin unmodified and no response is stored.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify QUERY is forwarded and not cached when QUERY caching is disabled'
+
+  server:
+    name: 'server-query-disabled'
+
+  client:
+    name: 'client-query-disabled'
+
+  ats:
+    name: 'ts-query-disabled'
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http.*|cache.*'
+      proxy.config.http.insert_age_in_response: 0
+      # proxy.config.http.cache.query_method is deliberately left at its
+      # default of 0 so that QUERY responses are not cached.
+
+    remap_config:
+      - from: /
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+
+    metric_checks:
+      - metric: proxy.process.http.query_requests
+        value: 2
+
+sessions:
+- transactions:
+
+  # The first QUERY. Verify the content arrives at the origin byte for byte.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/not/cached
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 27 ]
+        - [ uuid, query-disabled-1 ]
+      content:
+        encoding: plain
+        data: "SELECT * FROM t WHERE id=1;"
+
+    proxy-request:
+      method: "QUERY"
+      url: /query/not/cached
+      headers:
+        fields:
+        - [ Content-Type, { value: application/sql, as: equal } ]
+      content:
+        verify: { value: "SELECT * FROM t WHERE id=1;", as: equal }
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, first_query_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: first_query_response, as: equal } ]
+
+  # An identical QUERY. With QUERY caching disabled nothing was stored, so this
+  # must reach the origin as well. The distinct response proves it did.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /query/not/cached
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 27 ]
+        - [ uuid, query-disabled-2 ]
+      content:
+        encoding: plain
+        data: "SELECT * FROM t WHERE id=1;"
+
+      # Add a delay so ATS has time to finish any caching IO for the previous
+      # transaction.
+      delay: 100ms
+
+    proxy-request:
+      method: "QUERY"
+      url: /query/not/cached
+      content:
+        verify: { value: "SELECT * FROM t WHERE id=1;", as: equal }
+
+    # If ATS wrongly served the first response out of cache, this response is
+    # never seen by the client and the proxy-response check below fails.
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ Cache-Control, max-age=300 ]
+        - [ X-Response, second_query_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: second_query_response, as: equal } ]

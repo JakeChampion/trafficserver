@@ -100,6 +100,17 @@ Features
   overridable per remap rule. When a targeted header is present it takes
   precedence over the standard ``Cache-Control`` header, and the targeted
   header is passed downstream so cache hierarchies behave correctly.
+* The HTTP ``QUERY`` method (:rfc:`10008`) is now a recognized method. It is
+  treated as safe and idempotent, and can be used in :file:`ip_allow.yaml`
+  ``methods`` lists and :file:`remap.config` ``@method=`` filters. Caching of
+  ``QUERY`` responses is opt-in via
+  :ts:cv:`proxy.config.http.cache.query_method`, which is overridable per remap
+  rule; when enabled the request content is buffered, up to
+  :ts:cv:`proxy.config.http.cache.query_max_body_size`, and digested into the
+  cache key as the RFC requires. Requests whose content cannot be digested
+  bypass the cache rather than being keyed on part of it. See
+  :ref:`http-proxy-caching-query`. Plugins can use the new
+  ``TS_HTTP_METHOD_QUERY`` constant.
 * Connect retries to the origin can now back off exponentially, controlled by
   :ts:cv:`proxy.config.http.connect_attempts_retry_backoff_base`, instead of
   retrying immediately and piling connections onto a struggling origin.

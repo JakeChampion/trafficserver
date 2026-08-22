@@ -66,6 +66,7 @@
 #include "tscore/Layout.h"
 #include "ts/ats_probe.h"
 
+#include <openssl/evp.h>
 #include <openssl/ossl_typ.h>
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -774,7 +775,12 @@ HttpSM::state_read_client_request_header(int event, void *data)
         call_transact_and_set_next_state(HttpTransact::TooEarly);
         return 0;
       } else if (!SSLConfigParams::server_allow_early_data_params &&
-                 t_state.hdr_info.client_request.m_http->u.req.m_url_impl->m_len_query > 0) {
+                 (t_state.hdr_info.client_request.m_http->u.req.m_url_impl->m_len_query > 0 ||
+                  t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_QUERY)) {
+        // A QUERY carries in its content exactly the parameters this guard refuses
+        // to accept in the URI query component (RFC 10008 section 4 presents the
+        // content as the alternative to the query string), so it is held back for
+        // the same reason even though the method is safe.
         SMDbg(dbg_ctl_http, "client request was from early data but HAS parameters");
         call_transact_and_set_next_state(HttpTransact::TooEarly);
         return 0;
@@ -786,12 +792,18 @@ HttpSM::state_read_client_request_header(int event, void *data)
 
     if (t_state.hdr_info.client_request.version_get() == HTTP_1_1 &&
         (t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_POST ||
-         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_PUT)) {
+         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_PUT ||
+         t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_QUERY)) {
       auto expect{t_state.hdr_info.client_request.value_get(static_cast<std::string_view>(MIME_FIELD_EXPECT))};
       if (ts::iequals(expect, static_cast<std::string_view>(HTTP_VALUE_100_CONTINUE))) {
         // When receive an "Expect: 100-continue" request from client, ATS sends a "100 Continue" response to client
         // immediately, before receive the real response from original server.
-        if (t_state.http_config_param->send_100_continue_response) {
+        // A QUERY that will have its body buffered for the cache key cannot wait for
+        // the origin to send the 100: nothing is sent upstream until the whole body
+        // has been read, so the transaction would deadlock. Answer it immediately.
+        bool const buffered_query =
+          t_state.hdr_info.client_request.method_get_wksidx() == HTTP_WKSIDX_QUERY && t_state.txn_conf->cache_query_method == 1;
+        if (t_state.http_config_param->send_100_continue_response || buffered_query) {
           int64_t alloc_index = buffer_size_to_index(len_100_continue_response, t_state.http_config_param->max_payload_iobuf_index);
           if (_ua.get_entry()->write_buffer) {
             free_MIOBuffer(_ua.get_entry()->write_buffer);
@@ -2995,6 +3007,8 @@ HttpSM::tunnel_handler_post(int event, void *data)
       is_waiting_for_full_body  = false;
       is_buffering_request_body = true;
       client_request_body_bytes = this->postbuf_buffer_avail();
+
+      this->compute_query_content_digest();
 
       call_transact_and_set_next_state(HttpTransact::HandleRequestBufferDone);
       break;
@@ -5292,6 +5306,7 @@ HttpSM::do_cache_lookup_and_read()
   } else {
     Cache::generate_key(&key, c_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
   }
+  this->apply_query_cache_key(&key);
 
   t_state.hdr_info.cache_request.copy(&t_state.hdr_info.client_request);
   HttpTransactHeaders::normalize_accept_encoding(t_state.txn_conf, &t_state.hdr_info.cache_request);
@@ -5309,6 +5324,170 @@ HttpSM::do_cache_lookup_and_read()
   return;
 }
 
+namespace
+{
+// The QUERY cache key digest is computed with SHA-256 rather than through
+// CryptoContext, which is MD5 in a non-FIPS build. Every byte fed into this
+// digest comes from the request, so a hash whose collisions can be constructed
+// is the wrong tool: two chosen bodies that collide would share a cache entry,
+// and one requester would be served the other's stored response. A URL derived
+// key is less exposed, because a colliding URL must still be one the origin
+// will serve, whereas a request body is arbitrary bytes.
+//
+// Note this deliberately does not use SHA256Context::finalize(CryptoHash &):
+// CryptoHash is only CRYPTO_HASH_SIZE (16) bytes outside a FIPS build, and
+// SHA256_Final writes 32.
+class QueryDigest
+{
+public:
+  static constexpr size_t SIZE = 32;
+
+  QueryDigest() : _ctx(EVP_MD_CTX_new()) { EVP_DigestInit_ex(_ctx, EVP_sha256(), nullptr); }
+  ~QueryDigest() { EVP_MD_CTX_free(_ctx); }
+
+  QueryDigest(QueryDigest const &)            = delete;
+  QueryDigest &operator=(QueryDigest const &) = delete;
+
+  void
+  update(void const *data, size_t length)
+  {
+    EVP_DigestUpdate(_ctx, data, length);
+  }
+
+  // Fold in a length-prefixed field. The length prefix keeps the concatenation
+  // unambiguous: without it a body of "ab" with type "c" and a body of "a" with
+  // type "bc" would digest identically, so two different requests would collide.
+  void
+  update_field(std::string_view value)
+  {
+    uint64_t const len = value.length();
+
+    this->update(&len, sizeof(len));
+    if (len > 0) {
+      this->update(value.data(), len);
+    }
+  }
+
+  void
+  finalize(std::array<uint8_t, SIZE> &out)
+  {
+    unsigned int len = 0;
+
+    EVP_DigestFinal_ex(_ctx, out.data(), &len);
+  }
+
+private:
+  EVP_MD_CTX *_ctx = nullptr;
+};
+} // namespace
+
+// RFC 10008 section 2.7 requires the cache key of a QUERY to incorporate the
+// request content and its related representation metadata. The values are
+// digested byte for byte: the RFC permits normalizing semantically insignificant
+// differences first, but section 4 warns that a normalization false positive
+// returns the wrong stored response, so a missed hit is preferred to a wrong hit.
+void
+HttpSM::compute_query_content_digest()
+{
+  t_state.query_content_digest_valid = false;
+
+  if (t_state.method != HTTP_WKSIDX_QUERY || t_state.txn_conf->cache_query_method != 1 || t_state.query_cache_bypass) {
+    return;
+  }
+  if (!this->is_postbuf_valid()) {
+    t_state.query_cache_bypass = true;
+    SMDbg(dbg_ctl_http_cache_write, "QUERY body was not buffered; bypassing cache");
+    return;
+  }
+
+  HTTPHdr    *request = &t_state.hdr_info.client_request;
+  QueryDigest digest;
+
+  digest.update_field(static_cast<std::string_view>(HTTP_METHOD_QUERY));
+
+  // Content-Type carries the parameters (charset, boundary, ...) that decide how
+  // the origin interprets the content, so the whole field value participates.
+  //
+  // Every value of a repeated field is digested, preceded by how many there were.
+  // Digesting only the first would let "Content-Type: a" and "Content-Type: a"
+  // plus "Content-Type: b" share a key, and the count is what separates a field
+  // that is absent from one that is present and empty.
+  std::string_view const metadata_fields[] = {static_cast<std::string_view>(MIME_FIELD_CONTENT_TYPE),
+                                              static_cast<std::string_view>(MIME_FIELD_CONTENT_ENCODING),
+                                              static_cast<std::string_view>(MIME_FIELD_CONTENT_LANGUAGE)};
+  for (auto const &name : metadata_fields) {
+    MIMEField *field = request->field_find(name);
+    uint64_t   count = 0;
+
+    for (MIMEField *dup = field; dup != nullptr; dup = dup->m_next_dup) {
+      ++count;
+    }
+    digest.update(&count, sizeof(count));
+    for (MIMEField *dup = field; dup != nullptr; dup = dup->m_next_dup) {
+      digest.update_field(dup->value_get());
+    }
+  }
+
+  IOBufferReader *reader = this->get_postbuf_clone_reader();
+  if (reader == nullptr) {
+    t_state.query_cache_bypass = true;
+    return;
+  }
+
+  int64_t const  total    = reader->read_avail();
+  uint64_t const body_len = static_cast<uint64_t>(total < 0 ? 0 : total);
+
+  digest.update(&body_len, sizeof(body_len));
+
+  int64_t remaining = total;
+  while (remaining > 0) {
+    int64_t block_avail = reader->block_read_avail();
+    if (block_avail <= 0) {
+      break;
+    }
+    block_avail = std::min(block_avail, remaining);
+    digest.update(reader->start(), block_avail);
+    reader->consume(block_avail);
+    remaining -= block_avail;
+  }
+  reader->mbuf->dealloc_reader(reader);
+
+  // Key only on a body that is demonstrably complete. Digesting a short read would
+  // collide with a different query sharing that prefix, which is the one failure
+  // this design exists to prevent, so cross check against the declared length
+  // rather than trusting the tunnel's completion bookkeeping.
+  if (remaining != 0 || total != t_state.hdr_info.request_content_length) {
+    t_state.query_cache_bypass = true;
+    SMDbg(dbg_ctl_http_cache_write, "QUERY body was %" PRId64 " bytes but Content-Length was %" PRId64 "; bypassing cache", total,
+          t_state.hdr_info.request_content_length);
+    return;
+  }
+
+  digest.finalize(t_state.query_content_digest);
+  t_state.query_content_digest_valid = true;
+  SMDbg(dbg_ctl_http_cache_write, "computed QUERY content digest over %" PRId64 " body bytes", total);
+}
+
+// Mix the QUERY content digest into a key already derived from the URL. This runs
+// for lookup, write and delete alike so all three address the same object.
+void
+HttpSM::apply_query_cache_key(HttpCacheKey *key)
+{
+  if (t_state.method != HTTP_WKSIDX_QUERY || !t_state.query_content_digest_valid) {
+    return;
+  }
+
+  QueryDigest                            digest;
+  std::array<uint8_t, QueryDigest::SIZE> combined;
+
+  digest.update(key->hash.u8, sizeof(key->hash.u8));
+  digest.update(t_state.query_content_digest.data(), t_state.query_content_digest.size());
+  digest.finalize(combined);
+
+  static_assert(sizeof(key->hash.u8) <= QueryDigest::SIZE);
+  memcpy(key->hash.u8, combined.data(), sizeof(key->hash.u8));
+}
+
 void
 HttpSM::do_cache_delete_all_alts()
 {
@@ -5320,6 +5499,7 @@ HttpSM::do_cache_delete_all_alts()
   HttpCacheKey key;
   Cache::generate_key(&key, t_state.cache_info.lookup_url, t_state.txn_conf->cache_ignore_query,
                       t_state.txn_conf->cache_generation_number);
+  this->apply_query_cache_key(&key);
   cacheProcessor.remove(nullptr, &key);
 }
 
@@ -5397,6 +5577,7 @@ HttpSM::do_cache_prepare_action(HttpCacheSM *c_sm, CacheHTTPInfo *object_read_in
 
   HttpCacheKey key;
   Cache::generate_key(&key, s_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
+  this->apply_query_cache_key(&key);
 
   pending_action =
     c_sm->open_write(&key, s_url, &t_state.hdr_info.cache_request, object_read_info,
@@ -8696,6 +8877,12 @@ void
 HttpSM::redirect_request(const char *arg_redirect_url, const int arg_redirect_len)
 {
   SMDbg(dbg_ctl_http_redirect, "redirect url: %.*s", arg_redirect_len, arg_redirect_url);
+
+  // Note the status before touching anything: the response header does not
+  // survive the rewriting below, so it cannot be consulted at the end.
+  bool const followed_a_see_other =
+    t_state.hdr_info.client_response.valid() && t_state.hdr_info.client_response.status_get() == HTTPStatus::SEE_OTHER;
+
   // get a reference to the client request header and client url and check to see if the url is valid
   HTTPHdr &clientRequestHeader = t_state.hdr_info.client_request;
   URL     &clientUrl           = *clientRequestHeader.url_get();
@@ -8907,6 +9094,40 @@ HttpSM::redirect_request(const char *arg_redirect_url, const int arg_redirect_le
         // the server request didn't have a host, so remove it from the headers
         t_state.hdr_info.client_request.field_delete(static_cast<std::string_view>(MIME_FIELD_HOST));
       }
+    }
+  }
+
+  // RFC 9110 section 15.4.4: a 303 tells the requester to retrieve the redirect
+  // target, so the request that follows one is a GET carrying no content. Every
+  // other redirect status keeps the method, which is why this is not folded into
+  // the status list above.
+  //
+  // QUERY is always converted. RFC 10008 section 2.5 requires it, and nothing can
+  // depend on the previous behaviour for a method introduced in this same version.
+  // For the other methods the conversion is a change to behaviour that has shipped,
+  // so proxy.config.http.redirect.see_other_as_get can turn it off.
+  if (followed_a_see_other) {
+    int const method = t_state.hdr_info.client_request.method_get_wksidx();
+
+    if (method != HTTP_WKSIDX_GET && method != HTTP_WKSIDX_HEAD &&
+        (method == HTTP_WKSIDX_QUERY || t_state.txn_conf->redirect_see_other_as_get)) {
+      SMDbg(dbg_ctl_http_redirect, "following a 303 with a GET instead of replaying the original method");
+
+      t_state.hdr_info.client_request.method_set(static_cast<std::string_view>(HTTP_METHOD_GET));
+      t_state.hdr_info.client_request.field_delete(static_cast<std::string_view>(MIME_FIELD_CONTENT_LENGTH));
+      t_state.hdr_info.client_request.field_delete(static_cast<std::string_view>(MIME_FIELD_TRANSFER_ENCODING));
+
+      // These are recomputed from the headers when HandleRequest runs again, but
+      // they decide whether a body tunnel is set up at all, so leave nothing to
+      // infer: the content is gone and must not be replayed from any source.
+      t_state.hdr_info.request_content_length = 0;
+      t_state.client_info.transfer_encoding   = HttpTransact::TransferEncoding_t::NONE;
+      is_buffering_request_body               = false;
+      this->postbuf_clear();
+
+      // Any QUERY cache key digest describes content this request no longer has.
+      t_state.query_content_digest_valid = false;
+      t_state.query_cache_bypass         = false;
     }
   }
 

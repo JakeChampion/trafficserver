@@ -129,6 +129,11 @@ def configure_ats(obj: 'TestRun', server: 'Process', ats_config: dict, dns: Opti
         if sni_yaml != None:
             ts.Disk.sni_yaml.AddLines(yaml.dump(sni_yaml).split('\n'))
 
+    # Configure ip_allow.yaml if specified.
+    ip_allow_yaml = ats_config.get('ip_allow_yaml')
+    if ip_allow_yaml != None:
+        ts.Disk.ip_allow_yaml.AddLines(yaml.dump(ip_allow_yaml).split('\n'))
+
     # Configure plugin_config if specified.
     plugin_config = ats_config.get('plugin_config', [])
     for plugin_line in plugin_config:

@@ -211,6 +211,17 @@ Cache
 .. ts:stat:: global proxy.process.http.cache_updates integer
 .. ts:stat:: global proxy.process.http.cache_write_errors integer
 .. ts:stat:: global proxy.process.http.cache_writes integer
+
+.. ts:stat:: global proxy.process.http.query_cache_bypass_body_too_large integer
+   :type: counter
+
+   Represents the total number of HTTP :literal:`QUERY` requests which bypassed
+   the cache, since statistics collection began, because their request body was
+   larger than :ts:cv:`proxy.config.http.cache.query_max_body_size` and so could
+   not be digested into a cache key. This is only incremented when
+   :ts:cv:`proxy.config.http.cache.query_method` is enabled. See
+   :ref:`http-proxy-caching-query`.
+
 .. ts:stat:: global proxy.process.http.tcp_client_refresh_count integer
    :ungathered:
 

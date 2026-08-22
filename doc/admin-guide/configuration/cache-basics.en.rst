@@ -655,6 +655,151 @@ To configure how Traffic Server caches cookied content:
 
 #. Run the command :option:`traffic_ctl config reload` to apply the configuration changes.
 
+
+.. _http-proxy-caching-query:
+
+Caching QUERY Requests
+======================
+
+Traffic Server supports the HTTP ``QUERY`` method defined by :rfc:`10008`.
+``QUERY`` is a safe and idempotent method, like ``GET``, but it carries its
+parameters in the request content instead of in the URI. That makes it usable
+for requests whose parameters are too large, too structured, or too sensitive
+to place in a query string, and, unlike ``POST``, it is defined to be
+cacheable.
+
+Because the parameters live in the request content, two ``QUERY`` requests to
+the same URI are not the same request. :rfc:`10008` therefore requires that the
+cache key incorporate the request content, and Traffic Server must read and
+buffer the whole request body before it can even look the request up in the
+cache.
+
+Enabling QUERY Caching
+----------------------
+
+Caching of ``QUERY`` responses is opt-in and is disabled by default, because
+buffering the request body on every ``QUERY`` costs memory and adds latency to
+the transaction whether or not it ends up being a cache hit. To enable it:
+
+#. Enable :ts:cv:`proxy.config.http.cache.query_method` in :file:`records.yaml`::
+
+      CONFIG proxy.config.http.cache.query_method INT 1
+
+#. Optionally adjust :ts:cv:`proxy.config.http.cache.query_max_body_size`, which
+   bounds how much of a request body Traffic Server is willing to buffer::
+
+      CONFIG proxy.config.http.cache.query_max_body_size INT 65536
+
+#. Run the command :option:`traffic_ctl config reload` to apply the configuration changes.
+
+Both settings are overridable, so ``QUERY`` caching can be enabled for a single
+:file:`remap.config` rule rather than for all traffic. See
+:ref:`admin-plugins-conf-remap` for how to override configuration per remap
+rule.
+
+The QUERY Cache Key
+-------------------
+
+When ``QUERY`` caching is enabled, the cache key for a ``QUERY`` is derived from
+the usual cache key for the request URL, combined with a digest computed over:
+
+-  the request method,
+
+-  the value of the ``Content-Type`` request header, including all of its
+   parameters (``charset``, ``boundary``, and so on), since those decide how the
+   origin server interprets the content,
+
+-  the value of the ``Content-Encoding`` request header,
+
+-  the value of the ``Content-Language`` request header, and
+
+-  the entire request content.
+
+Each of these is fed into the digest with an explicit length prefix, so that no
+two different requests can produce the same digest by shifting bytes from one
+field into the next.
+
+All of these values are digested byte for byte. Traffic Server performs no
+normalization of the content or of the header values: it does not reorder
+fields, collapse whitespace, or canonicalize character sets. :rfc:`10008`
+permits a cache to normalize away semantically insignificant differences, but
+its Security Considerations warn that a false positive from such normalization
+causes the cache to return a stored response that belongs to a *different*
+request, potentially exposing one user's result to another. Traffic Server
+therefore prefers a missed hit over a wrong hit: two requests that differ in any
+byte are treated as distinct, at the cost of not sharing a cache entry that
+strictly speaking they could have shared.
+
+A response stored for a ``QUERY`` is only ever served to another ``QUERY``. It
+cannot be returned for a ``GET``, a ``POST``, or any other method to the same
+URL, and a response stored for another method is never served to a ``QUERY``.
+This separation comes from the digest being mixed into the key for ``QUERY``
+requests and for no other method, so a ``QUERY`` and a ``GET`` for the same URL
+address different cache entries by construction. (The method itself is also fed
+into the digest, but as the same constant for every ``QUERY``, so it
+distinguishes nothing on its own; it is there to keep the digest unambiguous
+should another method ever gain a content-derived key.)
+
+When a QUERY Bypasses the Cache
+-------------------------------
+
+A ``QUERY`` is proxied straight to the origin server, with neither a cache
+lookup nor a cache write, in any of these cases:
+
+-  :ts:cv:`proxy.config.http.cache.query_method` is disabled, which is the
+   default;
+
+-  the request body is larger than the buffering limit, which is the *lesser* of
+   :ts:cv:`proxy.config.http.cache.query_max_body_size` and
+   :ts:cv:`proxy.config.http.post_copy_size`. The latter bounds the buffer that
+   actually holds the body and defaults to 2048, so raising
+   ``query_max_body_size`` on its own has no effect; raise both. Traffic Server
+   logs a warning at startup if ``query_max_body_size`` is the larger of the two;
+
+-  the request does not declare a ``Content-Length``, so the size of the body is
+   not known before it is read. This includes a chunked request body, and it also
+   includes HTTP/2 and HTTP/3 requests, where clients commonly omit
+   ``content-length`` entirely. In practice ``QUERY`` caching therefore applies to
+   requests that arrive with an explicit ``Content-Length``;
+
+-  the request has no body.
+
+Where the length is not known up front the request content cannot be digested in
+full, and so no usable cache key can be computed for it.
+
+The request content is never truncated in order to make it fit. Keying a
+``QUERY`` on only a prefix of its content would let two distinct queries which
+happen to share that prefix collide on a single cache entry, and one client
+could then be served the answer to another client's query. Bypassing the cache
+is the only safe response.
+
+Requests which bypass the cache for exceeding the configured body size limit are
+counted by :ts:stat:`proxy.process.http.query_cache_bypass_body_too_large`. The
+total number of ``QUERY`` requests received is counted by
+:ts:stat:`proxy.process.http.query_requests`.
+
+``QUERY`` is a recognized method name for access control and remapping, so it
+can be listed in the ``methods`` of an :file:`ip_allow.yaml` rule and in an
+``@method=`` filter in :file:`remap.config`.
+
+Limitations
+-----------
+
+Because a stored ``QUERY`` response is keyed partly on its request content, it
+cannot be addressed by URL alone. A ``PURGE`` of the same URL, and the
+invalidation that an unsafe method to that URL would normally trigger, both act
+on the plain URL key and therefore do not reach any stored ``QUERY`` entry.
+:rfc:`10008` defines no mechanism for addressing these entries. Keep the
+freshness lifetime of cacheable ``QUERY`` responses short enough that a stale
+result is acceptable, since there is no way to evict one early.
+
+If redirection following is enabled with
+:ts:cv:`proxy.config.http.number_of_redirections`, a ``303 (See Other)``
+response to a ``QUERY`` is followed with a ``GET`` carrying no content, as
+:rfc:`10008` section 2.5 requires. This is unconditional for ``QUERY``;
+:ts:cv:`proxy.config.http.redirect.see_other_as_get` governs the same conversion
+for the other methods.
+
 Forcing Object Caching
 ======================
 

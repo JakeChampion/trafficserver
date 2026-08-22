@@ -404,6 +404,8 @@ register_stat_callbacks()
   http_rsb.pushed_document_total_size        = Metrics::Counter::createPtr("proxy.process.http.pushed_document_total_size");
   http_rsb.pushed_response_header_total_size = Metrics::Counter::createPtr("proxy.process.http.pushed_response_header_total_size");
   http_rsb.put_requests                      = Metrics::Counter::createPtr("proxy.process.http.put_requests");
+  http_rsb.query_requests                    = Metrics::Counter::createPtr("proxy.process.http.query_requests");
+  http_rsb.query_cache_bypass_body_too_large = Metrics::Counter::createPtr("proxy.process.http.query_cache_bypass_body_too_large");
   http_rsb.response_status_000_count         = Metrics::Counter::createPtr("proxy.process.http.000_responses");
   http_rsb.response_status_100_count         = Metrics::Counter::createPtr("proxy.process.http.100_responses");
   http_rsb.response_status_101_count         = Metrics::Counter::createPtr("proxy.process.http.101_responses");
@@ -1001,6 +1003,9 @@ HttpConfig::startup()
   HttpEstablishStaticConfigLongLong(c.oride.flow_low_water_mark, "proxy.config.http.flow_control.low_water");
   HttpEstablishStaticConfigByte(c.oride.post_check_content_length_enabled, "proxy.config.http.post.check.content_length.enabled");
   HttpEstablishStaticConfigByte(c.oride.cache_post_method, "proxy.config.http.cache.post_method");
+  HttpEstablishStaticConfigByte(c.oride.cache_query_method, "proxy.config.http.cache.query_method");
+  HttpEstablishStaticConfigByte(c.oride.redirect_see_other_as_get, "proxy.config.http.redirect.see_other_as_get");
+  HttpEstablishStaticConfigLongLong(c.oride.cache_query_max_body_size, "proxy.config.http.cache.query_max_body_size");
   HttpEstablishStaticConfigByte(c.oride.request_buffer_enabled, "proxy.config.http.request_buffer_enabled");
   HttpEstablishStaticConfigByte(c.strict_uri_parsing, "proxy.config.http.strict_uri_parsing");
 
@@ -1318,6 +1323,9 @@ HttpConfig::reconfigure()
 
   params->oride.post_check_content_length_enabled = INT_TO_BOOL(m_master.oride.post_check_content_length_enabled);
   params->oride.cache_post_method                 = INT_TO_BOOL(m_master.oride.cache_post_method);
+  params->oride.cache_query_method                = INT_TO_BOOL(m_master.oride.cache_query_method);
+  params->oride.redirect_see_other_as_get         = INT_TO_BOOL(m_master.oride.redirect_see_other_as_get);
+  params->oride.cache_query_max_body_size         = m_master.oride.cache_query_max_body_size;
 
   params->oride.request_buffer_enabled = INT_TO_BOOL(m_master.oride.request_buffer_enabled);
 
@@ -1559,6 +1567,11 @@ HttpConfig::reconfigure()
   if (params->oride.request_buffer_enabled && params->post_copy_size == 0) {
     Warning("proxy.config.http.request_buffer_enabled is set but proxy.config.http.post_copy_size is 0; request buffering "
             "will be disabled");
+  }
+  if (params->oride.cache_query_method && params->oride.cache_query_max_body_size > params->post_copy_size) {
+    Warning("proxy.config.http.cache.query_max_body_size (%" PRId64 ") is larger than proxy.config.http.post_copy_size (%" PRId64
+            "); QUERY requests with a body over %" PRId64 " bytes will bypass the cache",
+            static_cast<int64_t>(params->oride.cache_query_max_body_size), params->post_copy_size, params->post_copy_size);
   }
   params->redirect_actions_string = ats_strdup(m_master.redirect_actions_string);
   params->redirect_actions_map    = parse_redirect_actions(params->redirect_actions_string, params->redirect_actions_self_action);

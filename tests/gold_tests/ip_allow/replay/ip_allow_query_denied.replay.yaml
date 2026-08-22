@@ -1,0 +1,114 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# The converse of ip_allow_query_allowed: QUERY is absent from the ip_allow.yaml
+# method list, so it is rejected with a 403 while the listed methods proceed.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify ip_allow.yaml denies a QUERY absent from its methods'
+
+  server:
+    name: 'server-ip-allow-query-denied'
+
+  client:
+    name: 'client-ip-allow-query-denied'
+
+  ats:
+    name: 'ts-ip-allow-query-denied'
+    process_config:
+      enable_cache: false
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'ip_allow|http'
+
+    ip_allow_yaml:
+      ip_allow:
+      - apply: in
+        ip_addrs: 0/0
+        action: allow
+        methods: [GET, HEAD, POST]
+
+    remap_config:
+      - from: /
+        to: http://127.0.0.1:{SERVER_HTTP_PORT}/
+
+    log_validation:
+      traffic_out:
+        contains:
+        - expression: "denial for 'QUERY' from 127.0.0.1"
+          description: 'The QUERY request should be denied by ip_allow'
+
+sessions:
+- transactions:
+
+  # QUERY is not in the allow list and is rejected.
+  - client-request:
+      method: "QUERY"
+      version: "1.1"
+      url: /ip_allow/denied/query
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ Content-Type, application/sql ]
+        - [ Content-Length, 16 ]
+        - [ uuid, ip-deny-query ]
+      content:
+        encoding: plain
+        data: "query-body-alpha"
+
+    proxy-request:
+      expect: absent
+
+    # Not received: ATS rejects the request itself.
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+
+    proxy-response:
+      status: 403
+
+  # GET is in the allow list, so the rule is not simply denying everything.
+  - client-request:
+      method: "GET"
+      version: "1.1"
+      url: /ip_allow/allowed/get
+      headers:
+        fields:
+        - [ Host, example.com ]
+        - [ uuid, ip-deny-get ]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [ Content-Length, 16 ]
+        - [ X-Response, allowed_get_response ]
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [ X-Response, { value: allowed_get_response, as: equal } ]

@@ -57,16 +57,20 @@ bool
 HttpTransactHeaders::is_method_cacheable(const OverridableHttpConfigParams *http_config_param, const int method)
 {
   return (method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_HEAD ||
-          (http_config_param->cache_post_method == 1 && method == HTTP_WKSIDX_POST));
+          (http_config_param->cache_post_method == 1 && method == HTTP_WKSIDX_POST) ||
+          (http_config_param->cache_query_method == 1 && method == HTTP_WKSIDX_QUERY));
 }
 
 bool
-HttpTransactHeaders::is_method_cache_lookupable(int method)
+HttpTransactHeaders::is_method_cache_lookupable(const OverridableHttpConfigParams *http_config_param, int method)
 {
   // responses to GET, HEAD, and POST are cacheable
   // URL's requested in DELETE and PUT are looked up to remove cached copies
+  // QUERY is only looked up when caching it is enabled: its key covers the request
+  // content, which is only computed on that path.
   return (method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_HEAD || method == HTTP_WKSIDX_POST || method == HTTP_WKSIDX_DELETE ||
-          method == HTTP_WKSIDX_PUT || method == HTTP_WKSIDX_PURGE || method == HTTP_WKSIDX_PUSH);
+          method == HTTP_WKSIDX_PUT || method == HTTP_WKSIDX_PURGE || method == HTTP_WKSIDX_PUSH ||
+          (http_config_param->cache_query_method == 1 && method == HTTP_WKSIDX_QUERY));
 }
 
 bool
@@ -100,8 +104,9 @@ HttpTransactHeaders::is_this_method_supported(int the_scheme, int the_method)
 bool
 HttpTransactHeaders::is_method_safe(int method)
 {
-  // See RFC 7231, section 4.2.1.
-  return (method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_OPTIONS || method == HTTP_WKSIDX_HEAD || method == HTTP_WKSIDX_TRACE);
+  // See RFC 7231, section 4.2.1, and RFC 10008, section 2 for QUERY.
+  return (method == HTTP_WKSIDX_GET || method == HTTP_WKSIDX_OPTIONS || method == HTTP_WKSIDX_HEAD || method == HTTP_WKSIDX_TRACE ||
+          method == HTTP_WKSIDX_QUERY);
 }
 
 bool
@@ -115,7 +120,8 @@ bool
 HttpTransactHeaders::is_method_idempotent(int method)
 {
   return (method == HTTP_WKSIDX_CONNECT || method == HTTP_WKSIDX_DELETE || method == HTTP_WKSIDX_GET ||
-          method == HTTP_WKSIDX_HEAD || method == HTTP_WKSIDX_PUT || method == HTTP_WKSIDX_OPTIONS || method == HTTP_WKSIDX_TRACE);
+          method == HTTP_WKSIDX_HEAD || method == HTTP_WKSIDX_PUT || method == HTTP_WKSIDX_OPTIONS || method == HTTP_WKSIDX_TRACE ||
+          method == HTTP_WKSIDX_QUERY);
 }
 
 void
@@ -125,7 +131,7 @@ HttpTransactHeaders::insert_supported_methods_in_response(HTTPHdr *response, int
   const char *methods[] = {
     HTTP_METHOD_CONNECT.c_str(), HTTP_METHOD_DELETE.c_str(), HTTP_METHOD_GET.c_str(),   HTTP_METHOD_HEAD.c_str(),
     HTTP_METHOD_OPTIONS.c_str(), HTTP_METHOD_POST.c_str(),   HTTP_METHOD_PURGE.c_str(), HTTP_METHOD_PUT.c_str(),
-    HTTP_METHOD_PUSH.c_str(),    HTTP_METHOD_TRACE.c_str(),
+    HTTP_METHOD_PUSH.c_str(),    HTTP_METHOD_TRACE.c_str(),  HTTP_METHOD_QUERY.c_str(),
   };
   char  inline_buffer[64];
   char *alloced_buffer, *value_buffer;

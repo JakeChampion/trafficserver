@@ -34,7 +34,7 @@ class HttpTransactHeaders
 public:
   static bool is_this_http_method_supported(int method);
   static bool is_method_cacheable(const OverridableHttpConfigParams *http_config_param, const int method);
-  static bool is_method_cache_lookupable(int method);
+  static bool is_method_cache_lookupable(const OverridableHttpConfigParams *http_config_param, int method);
   static bool is_this_a_hop_by_hop_header(const char *field_name_wks);
   static bool is_this_method_supported(int the_scheme, int the_method);
 
@@ -104,7 +104,7 @@ HttpTransactHeaders::is_this_http_method_supported(int method)
   return ((method == HTTP_WKSIDX_GET) || (method == HTTP_WKSIDX_POST) || (method == HTTP_WKSIDX_CONNECT) ||
           (method == HTTP_WKSIDX_DELETE) || (method == HTTP_WKSIDX_PURGE) || (method == HTTP_WKSIDX_HEAD) ||
           (method == HTTP_WKSIDX_OPTIONS) || (method == HTTP_WKSIDX_PUT) || (method == HTTP_WKSIDX_PUSH) ||
-          (method == HTTP_WKSIDX_TRACE));
+          (method == HTTP_WKSIDX_TRACE) || (method == HTTP_WKSIDX_QUERY));
 }
 
 inline int

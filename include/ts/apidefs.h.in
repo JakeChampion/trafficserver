@@ -918,6 +918,9 @@ enum TSOverridableConfigKey {
   TS_CONFIG_HTTP_CACHE_POST_METHOD,
   TS_CONFIG_HTTP_CACHE_TARGETED_CACHE_CONTROL_HEADERS,
   TS_CONFIG_SSL_CLIENT_CA_CERT_PATH,
+  TS_CONFIG_HTTP_CACHE_QUERY_METHOD,
+  TS_CONFIG_HTTP_CACHE_QUERY_MAX_BODY_SIZE,
+  TS_CONFIG_HTTP_REDIRECT_SEE_OTHER_AS_GET,
   TS_CONFIG_LAST_ENTRY,
 };
 
@@ -1487,6 +1490,7 @@ extern const char *TS_HTTP_METHOD_PURGE;
 extern const char *TS_HTTP_METHOD_PUT;
 extern const char *TS_HTTP_METHOD_TRACE;
 extern const char *TS_HTTP_METHOD_PUSH;
+extern const char *TS_HTTP_METHOD_QUERY;
 
 /* --------------------------------------------------------------------------
    HTTP methods string lengths */
@@ -1500,6 +1504,7 @@ extern int TS_HTTP_LEN_PURGE;
 extern int TS_HTTP_LEN_PUT;
 extern int TS_HTTP_LEN_TRACE;
 extern int TS_HTTP_LEN_PUSH;
+extern int TS_HTTP_LEN_QUERY;
 
 /* --------------------------------------------------------------------------
    TLS Next Protocol well-known protocol names. */
