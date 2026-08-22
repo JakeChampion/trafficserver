@@ -60,7 +60,17 @@ enum class mapping_type {
 class UrlRewrite
 {
 public:
-  using URLTable = std::unordered_map<std::string, UrlMappingPathIndex *>;
+  /// Transparent hash so URLTable can be looked up by std::string_view without
+  /// constructing a temporary std::string (and heap allocation) per request.
+  struct TransparentStringHash {
+    using is_transparent = void;
+    size_t
+    operator()(std::string_view s) const noexcept
+    {
+      return std::hash<std::string_view>{}(s);
+    }
+  };
+  using URLTable = std::unordered_map<std::string, UrlMappingPathIndex *, TransparentStringHash, std::equal_to<>>;
   UrlRewrite()   = default;
   ~UrlRewrite();
 
