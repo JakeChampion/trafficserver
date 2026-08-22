@@ -221,6 +221,11 @@ jobs:
             libjansson-dev libmaxminddb-dev libhiredis-dev \
             python3-dev ncat telnet curl iproute2 nghttp2-client \
             clang
+          # The compress tests decode responses by shelling out to brotli and
+          # zstd, which are packaged separately from the libraries the build
+          # links against. Those tests gate on the ATS feature rather than on
+          # the tool, so a runner without them fails rather than skipping.
+          sudo apt-get install -y --no-install-recommends brotli zstd
 
       # accept_timeout drives the client with "nc -c <script>". The Fedora images
       # upstream CI uses provide nc from nmap-ncat, which kills the exec'd child as
