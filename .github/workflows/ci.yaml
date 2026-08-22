@@ -1,0 +1,356 @@
+#  Licensed to the Apache Software Foundation (ASF) under one or more contributor license
+#  agreements.  See the NOTICE file distributed with this work for additional information regarding
+#  copyright ownership.  The ASF licenses this file to you under the Apache License, Version 2.0
+#  (the "License"); you may not use this file except in compliance with the License.  You may obtain
+#  a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software distributed under the License
+#  is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+#  or implied. See the License for the specific language governing permissions and limitations under
+#  the License.
+
+name: CI
+
+on:
+  # Feature branches are covered by pull_request; listing them here as well would
+  # run the whole suite twice for every commit on an open PR.
+  push:
+    branches:
+      - master
+      - '[0-9]+.[0-9]+.x'
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The `ci` preset pins binaryDir to build-ci and CMAKE_INSTALL_PREFIX to /tmp/ats.
+  # Keep the prefix short: the JSONRPC unix socket path has a hard length cap.
+  BUILD_DIR: build-ci
+  INSTALL_PREFIX: /tmp/ats
+
+jobs:
+  # Apache RAT license audit. Must run on a pristine checkout: RAT scans the
+  # working tree, so any build residue is reported as an unapproved file.
+  rat:
+    name: License audit (RAT)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Java
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends default-jre-headless
+
+      - name: Run Apache RAT
+        run: |
+          java -jar ci/apache-rat-0.17.jar \
+            --input-exclude-file ci/rat-exclude.txt \
+            --input-include-file ci/rat-include.txt \
+            -- . | tee rat-report.txt
+          # The summary line is "  Unapproved:  0    A count of unapproved licenses."
+          # Pull the first bare integer off it rather than anchoring on layout.
+          unapproved=$(awk '/Unapproved:/ {
+            for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+$/) { print $i; exit }
+          }' rat-report.txt)
+          if [ -z "$unapproved" ]; then
+            echo "::error::Could not parse the unapproved-file count from the RAT report."
+            exit 1
+          fi
+          if [ "$unapproved" -ne 0 ]; then
+            echo "::error::Apache RAT found ${unapproved} file(s) with unapproved licenses."
+            sed -n '/Files with unapproved licenses/,/^$/p' rat-report.txt || true
+            exit 1
+          fi
+          echo "RAT: no unapproved files."
+
+      - name: Upload RAT report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rat-report
+          path: rat-report.txt
+          if-no-files-found: ignore
+
+  # The format targets are fixers, not checkers: run them, then require a clean
+  # tree. Only a configure is needed -- the targets live in the top-level
+  # CMakeLists and nothing is compiled.
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkgconf \
+            libssl-dev libpcre2-dev zlib1g-dev libbrotli-dev libncurses-dev \
+            libhwloc-dev libcap-dev libunwind-dev liblzma-dev libzstd-dev \
+            libluajit-5.1-dev luajit libfmt-dev
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # tools/clang-format.sh downloads a pinned clang-format (the system one is
+      # rejected on a version mismatch) into $GIT_COMMON_DIR/fmt.
+      - name: Cache pinned clang-format
+        uses: actions/cache@v4
+        with:
+          path: .git/fmt
+          key: clang-format-${{ hashFiles('tools/clang-format.sh') }}
+
+      - name: Configure
+        run: cmake -S . --preset ci
+
+      - name: Run formatters
+        run: cmake --build ${{ env.BUILD_DIR }} --target format
+
+      - name: Check for formatting changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Code is not correctly formatted. Run 'cmake --build build -t format' and commit the result."
+            exit 1
+          fi
+
+  build:
+    name: Build and unit test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkgconf ccache \
+            libssl-dev libpcre2-dev zlib1g-dev libbrotli-dev libncurses-dev \
+            libhwloc-dev libcap-dev libunwind-dev liblzma-dev libzstd-dev \
+            libluajit-5.1-dev luajit libfmt-dev \
+            libjansson-dev libmaxminddb-dev libhiredis-dev
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: build-${{ runner.os }}
+          max-size: 2G
+
+      # Cripts is off by default, but the connection_exempt_list plugin is written
+      # in Cripts, so without it that plugin is never built and any test that loads
+      # it dies at start up. Enabling it also brings the cripts gold test, which
+      # compiles a .cript at remap load time, into play.
+      - name: Configure
+        run: cmake -S . --preset ci -DENABLE_CRIPTS=ON
+
+      - name: Build
+        run: cmake --build ${{ env.BUILD_DIR }} -j"$(nproc)"
+
+      # Mandatory before ctest: the verify_remap_plugin / verify_global_plugin
+      # tests exec traffic_server, which chdirs to the install prefix. Without an
+      # install they all fail with "unable to change to root directory".
+      - name: Install
+        run: cmake --install ${{ env.BUILD_DIR }}
+
+      - name: Unit tests (ctest)
+        run: ctest --test-dir ${{ env.BUILD_DIR }} -j"$(nproc)" --output-on-failure
+
+      - name: Upload ctest logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs
+          path: ${{ env.BUILD_DIR }}/Testing/
+          if-no-files-found: ignore
+
+  # End-to-end AuTests, sharded. Runs on the bare runner and NOT in a container:
+  # every MakeATSProcess binds an IPv6 port unconditionally, and the GitHub
+  # Actions Docker bridge network has IPv6 disabled by default.
+  autest:
+    name: AuTest (shard ${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkgconf ccache \
+            libssl-dev libpcre2-dev zlib1g-dev libbrotli-dev libncurses-dev \
+            libhwloc-dev libcap-dev libunwind-dev liblzma-dev libzstd-dev \
+            libluajit-5.1-dev luajit libfmt-dev \
+            libjansson-dev libmaxminddb-dev libhiredis-dev \
+            python3-dev ncat telnet curl iproute2 nghttp2-client \
+            clang
+
+      # accept_timeout drives the client with "nc -c <script>". The Fedora images
+      # upstream CI uses provide nc from nmap-ncat, which kills the exec'd child as
+      # soon as the peer closes the socket, so the client exits when ATS times the
+      # transaction out. netcat-openbsd has no -c at all, and netcat-traditional
+      # keeps waiting on the child, so the run lasts the script's full sleep and the
+      # timeout is misclassified. Install ncat and let it provide nc, matching
+      # upstream. telnet is installed rather than relied on from the runner image,
+      # so the test either runs or skips for a reason we control.
+      - name: Provide nmap ncat as nc
+        run: sudo ln -sf /usr/bin/ncat /usr/local/bin/nc
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: build-${{ runner.os }}
+          max-size: 2G
+
+      - name: Verify IPv6 loopback
+        run: |
+          # Every autest binds an IPv6 port; fail loudly and early rather than
+          # letting 500 tests die with a confusing bind error.
+          python3 - <<'EOF'
+          import socket, sys
+          try:
+              s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+              s.bind(('::1', 0))
+              s.close()
+          except OSError as e:
+              sys.exit(f"IPv6 loopback unavailable: {e}")
+          print("IPv6 loopback OK")
+          EOF
+
+      # Proxy Verifier is downloaded at configure time into $GIT_COMMON_DIR.
+      - name: Cache Proxy Verifier
+        uses: actions/cache@v4
+        with:
+          path: .git/proxy-verifier*
+          key: proxy-verifier-${{ hashFiles('tests/proxy-verifier-version.txt', 'CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . --preset ci -DENABLE_AUTEST=ON -DENABLE_CRIPTS=ON
+
+      - name: Build
+        run: cmake --build ${{ env.BUILD_DIR }} -j"$(nproc)"
+
+      - name: Install
+        run: cmake --install ${{ env.BUILD_DIR }}
+
+      - name: Select shard
+        run: |
+          find tests/gold_tests -name '*.test.py' -printf '%f\n' \
+            | sed 's/\.test\.py$//' | sort -u > /tmp/all_tests.txt
+          total=$(wc -l < /tmp/all_tests.txt)
+          awk -v s=${{ matrix.shard }} 'NR % 4 == s' /tmp/all_tests.txt > /tmp/shard_tests.txt
+          echo "Selected $(wc -l < /tmp/shard_tests.txt) of ${total} tests for shard ${{ matrix.shard }}."
+          if [ ! -s /tmp/shard_tests.txt ]; then
+            echo "::error::Shard selection produced an empty test list."
+            exit 1
+          fi
+
+      - name: Sync test environment
+        working-directory: ${{ env.BUILD_DIR }}/tests
+        run: uv sync
+
+      # Deliberately fewer workers than cores. Each worker starts several real
+      # traffic_server instances, and at -j4 on a 4-core runner some of them lose
+      # the race to bind their ports and report "process finished before it was
+      # ready". Two workers per shard keeps the suite stable; the four shards
+      # still run concurrently, so wall clock is barely affected.
+      # These are end-to-end tests: each one starts real traffic_server, origin and
+      # DNS processes and binds real ports. A handful of them assert on timing, and
+      # on a shared runner they occasionally lose that race -- a different test each
+      # run, none of them reproducibly. Any test that fails is therefore retried
+      # once, on its own, and the job only fails if it fails again. The retry is
+      # reported as a warning so a genuinely flaky test stays visible rather than
+      # being silently absorbed.
+      - name: Run AuTests
+        working-directory: ${{ env.BUILD_DIR }}/tests
+        run: |
+          df -h / | tail -1
+          set +e
+          # Leave --clean at its default of "passed": a sandbox is reclaimed when its
+          # test passes, and kept when it does not, which is exactly what the failure
+          # artifact wants. Keeping every sandbox instead (--clean=none) accumulates
+          # a cache directory per ATS instance across all the tests in the shard.
+          bash ./autest.sh -j2 \
+            --sandbox /tmp/sb \
+            -f $(tr '\n' ' ' < /tmp/shard_tests.txt) 2>&1 | tee /tmp/autest.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "Disk after the run:"
+          df -h / | tail -1
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+
+          failed=$(awk '/^FAILED TESTS:/ {inlist = 1; next}
+                        inlist && /^ *- / {print $2; next}
+                        inlist && NF == 0 {next}
+                        inlist {inlist = 0}' /tmp/autest.log | sort -u)
+          if [ -z "$failed" ]; then
+            echo "::error::AuTest exited ${rc} without naming a failing test; not retrying."
+            exit "$rc"
+          fi
+
+          echo "::warning::AuTest failures, retrying serially: $(echo $failed | tr '\n' ' ')"
+          bash ./autest.sh -j1 --sandbox /tmp/sb-retry -f $failed
+          echo "::warning::Passed on retry, so these are flaky rather than broken: $(echo $failed | tr '\n' ' ')"
+
+      - name: Upload failed test sandboxes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autest-sandbox-shard-${{ matrix.shard }}
+          # The sandbox holds a directory per test with ATS logs and configs.
+          # Cap what we keep: a full sandbox can be gigabytes.
+          path: |
+            /tmp/sb*/**/diags.log
+            /tmp/sb*/**/*.log
+            /tmp/sb*/**/*.yaml
+            /tmp/sb*/**/*.config
+          retention-days: 7
+          if-no-files-found: ignore
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build graphviz default-jre-headless
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Configure
+        run: cmake -S . --preset ci-docs
+
+      # generate_docs runs sphinx with -W, so any warning fails the build.
+      - name: Build docs
+        run: cmake --build build-docs --target generate_docs
