@@ -284,7 +284,7 @@ QPACK::decode(uint64_t stream_id, const uint8_t *header_block, size_t header_blo
 
   uint64_t tmp = 0;
   int64_t  ret = xpack_decode_integer(tmp, header_block, header_block + header_block_len, 8);
-  if (ret < 0 && tmp > 0xFFFF) {
+  if (ret < 0 || tmp > 0xFFFF) {
     return -1;
   }
   uint16_t largest_reference = tmp;
@@ -919,17 +919,17 @@ QPACK::_decode_header(const uint8_t *header_block, size_t header_block_len, HTTP
   int64_t        ret;
 
   // Decode Header Data Prefix
-  uint64_t tmp;
-  if ((ret = xpack_decode_integer(tmp, pos, pos + remain_len, 8)) < 0 && tmp > 0xFFFF) {
+  uint64_t tmp = 0;
+  if ((ret = xpack_decode_integer(tmp, pos, pos + remain_len, 8)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   pos                        += ret;
   remain_len                 -= ret;
   uint16_t largest_reference  = tmp;
 
-  uint64_t delta_base_index;
+  uint64_t delta_base_index = 0;
   uint16_t base_index;
-  if ((ret = xpack_decode_integer(delta_base_index, pos, pos + remain_len, 7)) < 0 && delta_base_index < 0xFFFF) {
+  if ((ret = xpack_decode_integer(delta_base_index, pos, pos + remain_len, 7)) < 0 || delta_base_index > 0xFFFF) {
     return -2;
   }
 
@@ -1153,7 +1153,19 @@ QPACK::_on_encoder_stream_read_ready(IOBufferReader &reader)
       }
       QPACKDebug("Received Insert With Name Ref: is_static=%d, index=%d, value=%.*s", is_static, index, static_cast<int>(value_len),
                  value);
-      StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
+      XpackLookupResult result;
+      if (is_static) {
+        result = StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
+      } else if (!this->_dynamic_table.is_empty()) {
+        result = this->_dynamic_table.lookup_relative(index, &name, &name_len, &dummy, &dummy_len);
+      } else {
+        result = {index, XpackLookupResult::MatchType::NONE};
+      }
+      if (result.match_type != XpackLookupResult::MatchType::EXACT) {
+        this->_arena.str_free(value);
+        this->_abort_decode();
+        return EVENT_DONE;
+      }
       this->_dynamic_table.insert_entry(name, name_len, value, value_len);
       this->_arena.str_free(value);
     } else if (buf & 0x40) { // Insert Without Name Reference
@@ -1219,6 +1231,10 @@ QPACK::estimate_header_block_size(const HTTPHdr & /* hdr ATS_UNUSED */)
 const XpackLookupResult
 QPACK::StaticTable::lookup(uint16_t index, const char **name, size_t *name_len, const char **value, size_t *value_len)
 {
+  if (index >= countof(STATIC_HEADER_FIELDS)) {
+    return {index, XpackLookupResult::MatchType::NONE};
+  }
+
   const Header &header = STATIC_HEADER_FIELDS[index];
   *name                = header.name;
   *name_len            = header.name_len;
@@ -1511,15 +1527,15 @@ QPACK::_read_insert_with_name_ref(IOBufferReader &reader, bool &is_static, uint1
   is_static = input[0] & 0x40;
 
   // Name Index
-  uint64_t tmp;
-  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 6)) < 0 && tmp > 0xFFFF) {
+  uint64_t tmp = 0;
+  if ((ret = xpack_decode_integer(tmp, input, input + input_len, 6)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   index     = tmp;
   read_len += ret;
 
   // Value
-  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 &&
+  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 ||
       tmp > 0xFF) {
     return -1;
   }
@@ -1542,15 +1558,15 @@ QPACK::_read_insert_without_name_ref(IOBufferReader &reader, Arena &arena, char 
   int      input_len = p - input;
 
   // Name
-  uint64_t tmp;
-  if ((ret = xpack_decode_string(arena, name, tmp, input, input + input_len, _header_field_max_size, 5)) < 0 && tmp > 0xFFFF) {
+  uint64_t tmp = 0;
+  if ((ret = xpack_decode_string(arena, name, tmp, input, input + input_len, _header_field_max_size, 5)) < 0 || tmp > 0xFFFF) {
     return -1;
   }
   name_len  = tmp;
   read_len += ret;
 
   // Value
-  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 &&
+  if ((ret = xpack_decode_string(arena, value, tmp, input + read_len, input + input_len, _header_field_max_size, 7)) < 0 ||
       tmp > 0xFFFF) {
     return -1;
   }
