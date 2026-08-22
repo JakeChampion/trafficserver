@@ -74,10 +74,16 @@ uint32_t
 CacheVC::load_http_info(CacheHTTPInfoVector *info, Doc *doc, RefCountObj *block_ptr)
 {
   uint32_t zret = info->get_handles(doc->hdr(), doc->hlen, block_ptr);
-  if (!this->f.doc_from_ram_cache && // ram cache is always already fixed up.
-                                     // If this is an old object, the object version will be old or 0, in either case this is
-                                     // correct. Forget the 4.2 compatibility, always update older versioned objects.
-      ts::VersionNumber(doc->v_major, doc->v_minor) < CACHE_DB_VERSION) {
+  // If this is an old object, the object version will be old or 0, in either case this is
+  // correct. Forget the 4.2 compatibility, always update older versioned objects.
+  //
+  // This used to skip objects coming from the RAM cache, on the grounds that they
+  // had already been fixed up. That does not hold when the RAM cache is compressed
+  // (proxy.config.cache.ram_cache.compress): those entries are stored still
+  // marshalled and are decompressed into a fresh buffer on every hit, so the
+  // recompute has to run again or the well known string indices stay stale. The
+  // work is bounded to objects written by an older version.
+  if (ts::VersionNumber(doc->v_major, doc->v_minor) < CACHE_DB_VERSION) {
     for (int i = info->xcount - 1; i >= 0; --i) {
       info->data(i).alternate.m_alt->m_response_hdr.m_mime->recompute_accelerators_and_presence_bits();
       info->data(i).alternate.m_alt->m_request_hdr.m_mime->recompute_accelerators_and_presence_bits();
