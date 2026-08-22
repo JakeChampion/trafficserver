@@ -1144,7 +1144,14 @@ Examples:
         print("\nRun was interrupted by user.")
         sys.exit(130)
     total_failed = sum(r.failed + r.exceptions for r in results)
-    sys.exit(1 if total_failed > 0 else 0)
+    # A worker that dies partway through reports no failures of its own, so its
+    # return code has to count too; otherwise the shard reports green having
+    # silently skipped whatever it had left to run.
+    failed_workers = [r for r in results if r.return_code not in (0, None)]
+    if failed_workers:
+        print(f"\n{len(failed_workers)} worker(s) exited non-zero: " + ", ".join(
+            f"worker {r.worker_id} rc={r.return_code}" for r in failed_workers))
+    sys.exit(1 if total_failed > 0 or failed_workers else 0)
 
 
 if __name__ == '__main__':
