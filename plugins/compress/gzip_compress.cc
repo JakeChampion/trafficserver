@@ -35,7 +35,6 @@ extern const char *dictionary;
 
 namespace Gzip
 {
-const int ZLIB_COMPRESSION_LEVEL = 6;
 voidpf
 gzip_alloc(voidpf /* opaque ATS_UNUSED */, uInt items, uInt size)
 {
@@ -67,7 +66,8 @@ data_alloc(Data *data)
   data->zstrm.opaque    = (voidpf) nullptr;
   data->zstrm.data_type = Z_ASCII;
 
-  int err = deflateInit2(&data->zstrm, ZLIB_COMPRESSION_LEVEL, Z_DEFLATED, window_bits, ZLIB_MEMLEVEL, Z_DEFAULT_STRATEGY);
+  int err =
+    deflateInit2(&data->zstrm, data->hc->zlib_compression_level(), Z_DEFLATED, window_bits, ZLIB_MEMLEVEL, Z_DEFAULT_STRATEGY);
 
   if (err != Z_OK) {
     fatal("gzip-transform: ERROR: deflateInit (%d)!", err);

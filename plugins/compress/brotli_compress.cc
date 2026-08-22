@@ -32,8 +32,6 @@
 
 namespace Brotli
 {
-const int BROTLI_COMPRESSION_LEVEL = 6;
-const int BROTLI_LGW               = 16;
 
 static bool
 compress_operation(Data *data, const char *upstream_buffer, int64_t upstream_length, BrotliEncoderOperation op)
@@ -82,8 +80,8 @@ data_alloc(Data *data)
   if (!data->bstrm.br) {
     fatal("Brotli Encoder Instance Failed");
   }
-  BrotliEncoderSetParameter(data->bstrm.br, BROTLI_PARAM_QUALITY, BROTLI_COMPRESSION_LEVEL);
-  BrotliEncoderSetParameter(data->bstrm.br, BROTLI_PARAM_LGWIN, BROTLI_LGW);
+  BrotliEncoderSetParameter(data->bstrm.br, BROTLI_PARAM_QUALITY, data->hc->brotli_compression_level());
+  BrotliEncoderSetParameter(data->bstrm.br, BROTLI_PARAM_LGWIN, data->hc->brotli_lgw_size());
   data->bstrm.next_in   = nullptr;
   data->bstrm.avail_in  = 0;
   data->bstrm.total_in  = 0;
