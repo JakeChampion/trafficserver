@@ -180,12 +180,21 @@ the full value including parameters is used for matching. Defaults to ``false``.
 allow
 --------
 
-Provides a wildcard pattern which will be applied to request URLs. Any which
+Provides a wildcard pattern which will be applied to the request path. Any which
 match the pattern will be considered compressible, and only deflated versions
 of the objects will be cached and returned to clients. This may be useful for
 objects which already have their own compression built-in, to avoid the expense
-of multiple rounds of compression for trivial gains. If the regex is preceded by
-``!`` (for example ``allow !*/nothere/*``), it disables the plugin from those machine URLs.
+of multiple rounds of compression for trivial gains. If the pattern is preceded by
+``!`` (for example ``allow !*/nothere/*``), it disables the plugin from those paths.
+
+The pattern is matched against the path and query of the request, beginning with
+``/`` -- so ``/images/*`` and ``!/private/*.js`` both work as written. The scheme
+and host are not part of the match; use a ``[host]`` section to configure a
+specific origin.
+
+Note that these patterns are a list of what to allow, so once any ``allow`` is
+configured, a request whose path matches none of the patterns is **not**
+compressed.
 
 enabled
 -------
