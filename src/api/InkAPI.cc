@@ -6108,6 +6108,13 @@ TSHttpTxnServerIntercept(TSCont contp, TSHttpTxn txnp)
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
   sdk_assert(sdk_sanity_check_continuation(contp) == TS_SUCCESS);
 
+  if (http_sm->plugin_tunnel != nullptr) {
+    // A previous intercept is already installed on this transaction; overwriting
+    // it would leak the earlier PluginVCCore and strand its interceptor.
+    Error("[TSHttpTxnServerIntercept] transaction already has an intercept; ignoring the duplicate");
+    return;
+  }
+
   TSIOBufferSizeIndex buffer_index      = TSPluginVCIOBufferIndexGet(txnp);
   TSIOBufferWaterMark buffer_water_mark = TSPluginVCIOBufferWaterMarkGet(txnp);
 
@@ -6122,6 +6129,13 @@ TSHttpTxnIntercept(TSCont contp, TSHttpTxn txnp)
 
   sdk_assert(sdk_sanity_check_txn(txnp) == TS_SUCCESS);
   sdk_assert(sdk_sanity_check_continuation(contp) == TS_SUCCESS);
+
+  if (http_sm->plugin_tunnel != nullptr) {
+    // A previous intercept is already installed on this transaction; overwriting
+    // it would leak the earlier PluginVCCore and strand its interceptor.
+    Error("[TSHttpTxnIntercept] transaction already has an intercept; ignoring the duplicate");
+    return;
+  }
 
   TSIOBufferSizeIndex buffer_index      = TSPluginVCIOBufferIndexGet(txnp);
   TSIOBufferWaterMark buffer_water_mark = TSPluginVCIOBufferWaterMarkGet(txnp);
