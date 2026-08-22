@@ -973,10 +973,32 @@ handle_request(TSHttpTxn txnp, Configuration *config)
 
     if (hc->enabled()) {
       if (hc->has_allows()) {
-        int   url_len;
-        char *url = TSHttpTxnEffectiveUrlStringGet(txnp, &url_len);
-        allowed   = hc->is_url_allowed(url, url_len);
-        TSfree(url);
+        TSMLoc url_loc;
+
+        // Match against the path, which is the form the documentation and
+        // sample.compress.config use.  Matching the effective URL instead would
+        // mean no pattern anchored at / could ever match, and because a list of
+        // allows with nothing matching denies the request, that turns
+        // compression off rather than merely failing to enable it.
+        if (TSHttpHdrUrlGet(req_buf, req_loc, &url_loc) == TS_SUCCESS) {
+          int         path_len  = 0;
+          int         query_len = 0;
+          const char *path      = TSUrlPathGet(req_buf, url_loc, &path_len);
+          const char *query     = TSUrlHttpQueryGet(req_buf, url_loc, &query_len);
+          std::string target;
+
+          target.reserve(1 + path_len + (query_len ? 1 + query_len : 0));
+          target.push_back('/');
+          if (path != nullptr) {
+            target.append(path, path_len);
+          }
+          if (query != nullptr && query_len > 0) {
+            target.push_back('?');
+            target.append(query, query_len);
+          }
+          allowed = hc->is_url_allowed(target.data(), target.size());
+          TSHandleMLocRelease(req_buf, req_loc, url_loc);
+        }
       } else {
         allowed = true;
       }
