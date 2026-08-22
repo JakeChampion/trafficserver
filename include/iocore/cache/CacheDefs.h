@@ -44,6 +44,12 @@ static const uint8_t CACHE_DB_MINOR_VERSION = 2;
 // VersionNumber prevents that.
 extern const ts::VersionNumber CACHE_DB_VERSION;
 
+// The boundary at which HTTPInfo's marshalled layout last changed. Objects older
+// than this need HTTPInfo::unmarshal_v24_1. This is deliberately a fixed value
+// rather than CACHE_DB_VERSION: it describes one specific format change, so it
+// must not move when the minor version is bumped for unrelated reasons.
+static const ts::VersionNumber CACHE_DB_VERSION_HTTPINFO_V24_2(24, 2);
+
 static const uint8_t CACHE_DIR_MAJOR_VERSION = 18;
 static const uint8_t CACHE_DIR_MINOR_VERSION = 0;
 

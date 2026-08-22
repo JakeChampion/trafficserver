@@ -327,7 +327,7 @@ unmarshal_helper(Doc *doc, Ptr<IOBufferData> &buf, int &okay)
 
   // introduced by https://github.com/apache/trafficserver/pull/4874, this is used to distinguish the doc version
   // before and after #4847
-  if (version < CACHE_DB_VERSION) {
+  if (version < CACHE_DB_VERSION_HTTPINFO_V24_2) {
     unmarshal_func = &HTTPInfo::unmarshal_v24_1;
   }
 
