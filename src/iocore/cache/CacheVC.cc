@@ -382,6 +382,18 @@ CacheVC::handleReadDone(int event, Event * /* e ATS_UNUSED */)
     ink_assert(stripe->mutex->nthread_holding < 1000);
     ink_assert(doc->magic == DOC_MAGIC);
 
+    // Guard against a corrupted Doc whose length field exceeds what was actually
+    // read into the buffer (sized to the fragment's approximate on-disk size).
+    // The checksum loop, RAM-cache insertion, and IOBufferBlock construction below
+    // all trust doc->len and would otherwise read out of bounds.
+    if (doc->magic == DOC_MAGIC &&
+        (doc->len < sizeof(Doc) || static_cast<uint64_t>(doc->len) > static_cast<uint64_t>(io.aiocb.aio_nbytes))) {
+      Note("cache: invalid Doc length %d (read %zu bytes) for [%" PRIu64 " %" PRIu64 "], disk %s", doc->len,
+           static_cast<size_t>(io.aiocb.aio_nbytes), read_key->slice64(0), read_key->slice64(1), stripe->hash_text.get());
+      doc->magic = DOC_CORRUPT;
+      goto Ldone;
+    }
+
     if (ts::VersionNumber(doc->v_major, doc->v_minor) > CACHE_DB_VERSION) {
       // future version, count as corrupted
       doc->magic = DOC_CORRUPT;
