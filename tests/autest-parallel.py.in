@@ -47,6 +47,10 @@ DEFAULT_SERIAL_TESTS_FILE = Path("${CMAKE_CURRENT_SOURCE_DIR}") / "serial_tests.
 DEFAULT_TEST_TIME = 15.0
 
 
+# autest's exit code when every test it ran was skipped.
+AUTEST_RC_SKIPPED = 10
+
+
 @dataclass
 class TestResult:
     """Result from running a single autest process."""
@@ -60,6 +64,7 @@ class TestResult:
     unknown: int = 0
     duration: float = 0.0
     failed_tests: List[str] = field(default_factory=list)
+    skipped_tests: List[str] = field(default_factory=list)
     test_timings: Dict[str, float] = field(default_factory=dict)
     output: str = ""
     return_code: int = 0
@@ -245,6 +250,7 @@ def parse_autest_output(output: str) -> dict:
         'exceptions': 0,
         'unknown': 0,
         'failed_tests': [],
+        'skipped_tests': [],
         'test_timings': {}
     }
 
@@ -315,6 +321,21 @@ def parse_autest_output(output: str) -> dict:
     failed_pattern = re.compile(r'Test:\s+(\S+):\s+Failed', re.IGNORECASE)
     for match in failed_pattern.finditer(clean_output):
         result['failed_tests'].append(match.group(1))
+
+    # And the skipped ones.  A skip is how a test reports that its dependencies
+    # are absent, so a run that skips half the suite looks the same in the
+    # summary as one that ran it all.  autest names a skipped test two ways:
+    # 'Running Test <name>: Skipped' as it goes, and 'Test "<name>" Skipped' in
+    # the report it prints at the end.
+    skipped_patterns = (
+        re.compile(r'Test\s+"([^"]+)"\s+Skipped', re.IGNORECASE),
+        re.compile(r'Running Test\s+(\S+?):\s*Skipped', re.IGNORECASE),
+    )
+    for pattern in skipped_patterns:
+        for match in pattern.finditer(clean_output):
+            name = match.group(1)
+            if name not in result['skipped_tests']:
+                result['skipped_tests'].append(name)
 
     return result
 
@@ -641,6 +662,7 @@ def run_worker(
             result.exceptions = parsed['exceptions']
             result.unknown = parsed['unknown']
             result.failed_tests = parsed['failed_tests']
+            result.skipped_tests = parsed['skipped_tests']
 
             # If no tests ran at all (passed + failed + skipped == 0),
             # autest likely errored at setup (e.g., missing proxy verifier).
@@ -687,6 +709,14 @@ def print_summary(results: List[TestResult], total_duration: float, expected_tim
                 seen.add(t)
                 all_failed_tests.append(t)
 
+    seen_skipped = set()
+    all_skipped_tests = []
+    for r in results:
+        for t in r.skipped_tests:
+            if t not in seen_skipped:
+                seen_skipped.add(t)
+                all_skipped_tests.append(t)
+
     # Collect actual timings from results
     actual_timings = {}
     for r in results:
@@ -705,6 +735,12 @@ def print_summary(results: List[TestResult], total_duration: float, expected_tim
     print(f"  Warnings:   {total_warnings}")
     print(f"  Exceptions: {total_exceptions}")
     print(f"  Unknown:    {total_unknown}")
+
+    if all_skipped_tests:
+        print("-" * 70)
+        print("SKIPPED TESTS:")
+        for test in sorted(all_skipped_tests):
+            print(f"  - {test}")
 
     if all_failed_tests:
         print("-" * 70)
@@ -1147,7 +1183,15 @@ Examples:
     # A worker that dies partway through reports no failures of its own, so its
     # return code has to count too; otherwise the shard reports green having
     # silently skipped whatever it had left to run.
-    failed_workers = [r for r in results if r.return_code not in (0, None)]
+    #
+    # autest exits AUTEST_RC_SKIPPED when every test it was given skipped, which
+    # is not a failure: a worker can be handed a batch that is entirely gated on
+    # a feature this build does not have.  Count that code only when the worker
+    # also reported no skips, which would mean it exited for some other reason.
+    failed_workers = [
+        r for r in results
+        if r.return_code not in (0, None) and not (r.return_code == AUTEST_RC_SKIPPED and r.skipped > 0 and r.failed == 0)
+    ]
     if failed_workers:
         print(f"\n{len(failed_workers)} worker(s) exited non-zero: " + ", ".join(
             f"worker {r.worker_id} rc={r.return_code}" for r in failed_workers))
