@@ -232,6 +232,13 @@ class Configuration : private atscppapi::noncopyable
   friend class HostConfiguration;
 
 public:
+  ~Configuration()
+  {
+    for (auto *host_configuration : host_configurations_) {
+      delete host_configuration;
+    }
+  }
+
   [[nodiscard]] static Configuration *Parse(const char *path);
   [[nodiscard]] HostConfiguration    *find(const char *host, int host_length);
 

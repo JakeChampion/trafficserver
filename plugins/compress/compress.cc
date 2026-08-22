@@ -29,6 +29,7 @@
 
 #include <tsutil/PostScript.h>
 #include <tsutil/Metrics.h>
+#include <tsutil/AtomicSharedPtr.h>
 
 #include "ts/ts.h"
 #include "tscore/ink_defs.h"
@@ -69,11 +70,18 @@ const char *dictionary = nullptr;
 
 static const char *global_hidden_header_name = nullptr;
 
-static TSMutex compress_config_mutex = nullptr;
+// The current global configuration.  A transaction holds a reference to the one
+// it started with for as long as it runs, so a reload publishes a new
+// configuration without being able to free a configuration still in use.
+AtomicSharedPtr<Configuration> cur_config;
 
-// Current global configuration, and the previous one (for cleanup)
-Configuration *cur_config  = nullptr;
-Configuration *prev_config = nullptr;
+// What a transaction needs to keep for its lifetime.  config is the reference
+// that keeps hc alive; a remap rule leaves it empty because the remap instance
+// owns that configuration and core holds the instance for the transaction.
+struct TransactionState {
+  std::shared_ptr<Configuration> config;
+  HostConfiguration             *hc;
+};
 
 namespace
 {
@@ -853,11 +861,7 @@ find_host_configuration(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer bufp, TSMLoc 
     strv = TSMimeHdrFieldValueStringGet(bufp, locp, fieldp, -1, &strl);
     TSHandleMLocRelease(bufp, locp, fieldp);
   }
-  if (config == nullptr) {
-    host_configuration = cur_config->find(strv, strl);
-  } else {
-    host_configuration = config->find(strv, strl);
-  }
+  host_configuration = config->find(strv, strl);
   return host_configuration;
 }
 
@@ -867,7 +871,8 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
   TSHttpTxn          txnp          = static_cast<TSHttpTxn>(edata);
   int                compress_type = COMPRESSION_TYPE_DEFAULT;
   int                algorithms    = ALGORITHM_DEFAULT;
-  HostConfiguration *hc            = static_cast<HostConfiguration *>(TSContDataGet(contp));
+  TransactionState  *state         = static_cast<TransactionState *>(TSContDataGet(contp));
+  HostConfiguration *hc            = state->hc;
 
   switch (event) {
   case TS_EVENT_HTTP_READ_RESPONSE_HDR:
@@ -933,7 +938,8 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
   } break;
 
   case TS_EVENT_HTTP_TXN_CLOSE:
-    // Release the ocnif lease, and destroy this continuation
+    // Releasing this reference is what lets a replaced configuration go away.
+    delete state;
     TSContDestroy(contp);
     break;
 
@@ -964,11 +970,16 @@ handle_request(TSHttpTxn txnp, Configuration *config)
   HostConfiguration *hc;
 
   if (TSHttpTxnClientReqGet(txnp, &req_buf, &req_loc) == TS_SUCCESS) {
+    // A remap rule passes its own configuration, which core keeps alive for the
+    // transaction.  The global one has to be pinned here instead.
+    std::shared_ptr<Configuration> global_config;
+
     if (config == nullptr) {
-      hc = find_host_configuration(txnp, req_buf, req_loc, nullptr);
-    } else {
-      hc = find_host_configuration(txnp, req_buf, req_loc, config);
+      global_config = cur_config.load(std::memory_order_acquire);
+      config        = global_config.get();
     }
+    hc = find_host_configuration(txnp, req_buf, req_loc, config);
+
     bool allowed = false;
 
     if (hc->enabled()) {
@@ -1006,7 +1017,7 @@ handle_request(TSHttpTxn txnp, Configuration *config)
     if (allowed) {
       TSCont transform_contp = TSContCreate(transform_plugin, nullptr);
 
-      TSContDataSet(transform_contp, (void *)hc);
+      TSContDataSet(transform_contp, new TransactionState{std::move(global_config), hc});
 
       info("Kicking off compress plugin for request");
       normalize_accept_encoding(txnp, req_buf, req_loc);
@@ -1041,20 +1052,12 @@ transform_global_plugin(TSCont /* contp ATS_UNUSED */, TSEvent event, void *edat
 static void
 load_global_configuration(TSCont contp)
 {
-  const char    *path      = static_cast<const char *>(TSContDataGet(contp));
-  Configuration *newconfig = Configuration::Parse(path);
-  Configuration *oldconfig = __sync_lock_test_and_set(&cur_config, newconfig);
+  const char                    *path = static_cast<const char *>(TSContDataGet(contp));
+  std::shared_ptr<Configuration> newconfig(Configuration::Parse(path));
 
-  debug("config swapped, old config %p", oldconfig);
+  auto oldconfig = cur_config.exchange(std::move(newconfig), std::memory_order_acq_rel);
 
-  // need a mutex for when there are multiple reloads going on
-  TSMutexLock(compress_config_mutex);
-  if (prev_config) {
-    debug("deleting previous configuration container, %p", prev_config);
-    delete prev_config;
-  }
-  prev_config = oldconfig;
-  TSMutexUnlock(compress_config_mutex);
+  debug("config swapped, old config %p", oldconfig.get());
 }
 
 static int
@@ -1071,8 +1074,7 @@ management_update(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 void
 TSPluginInit(int argc, const char *argv[])
 {
-  const char *config_path         = nullptr;
-  Compress::compress_config_mutex = TSMutexCreate();
+  const char *config_path = nullptr;
 
   if (argc > 2) {
     fatal("the compress plugin does not accept more than 1 plugin argument");
