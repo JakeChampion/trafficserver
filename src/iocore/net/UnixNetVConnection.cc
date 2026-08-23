@@ -958,7 +958,15 @@ UnixNetVConnection::startEvent(int /* event ATS_UNUSED */, Event *e)
   if (!action_.cancelled) {
     connectUp(e->ethread, NO_FD);
   } else {
-    get_NetHandler(e->ethread)->free_netevent(this);
+    // This VC was scheduled onto the thread before connectUp()/startIO(), so it
+    // may not be attached to a NetHandler yet. free_netevent() asserts the VC is
+    // on this NetHandler; use free_thread() when it is not, mirroring the failure
+    // path in connectUp().
+    if (nullptr != nh) {
+      nh->free_netevent(this);
+    } else {
+      this->free_thread(e->ethread);
+    }
   }
   return EVENT_DONE;
 }

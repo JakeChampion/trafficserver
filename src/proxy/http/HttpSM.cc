@@ -2208,7 +2208,13 @@ HttpSM::state_read_server_response_header(int event, void *data)
     // case of transform plugin, this is after the transform
     // outputs the 1st byte, which can take a long time if the
     // plugin buffers the whole response.
-    _ua.get_txn()->set_inactivity_timeout(HRTIME_SECONDS(t_state.txn_conf->transaction_no_activity_timeout_in));
+    //
+    // _ua.get_txn() can be null for internally-generated requests
+    // (SCHEDULED_UPDATE / REVPROXY), as asserted in
+    // setup_server_read_response_header(); guard the dereference to match.
+    if (_ua.get_txn() != nullptr) {
+      _ua.get_txn()->set_inactivity_timeout(HRTIME_SECONDS(t_state.txn_conf->transaction_no_activity_timeout_in));
+    }
 
     t_state.current.state         = HttpTransact::CONNECTION_ALIVE;
     t_state.transact_return_point = HttpTransact::HandleResponse;

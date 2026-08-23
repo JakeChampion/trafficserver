@@ -136,7 +136,7 @@ RemapPluginInfo::init(std::string &error)
   ri.tsremap_version = TSREMAP_VERSION;
   ri.plugin_info     = reinterpret_cast<TSRemapPluginInfo>(this);
 
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (init_cb && init_cb(&ri, tmpbuf, sizeof(tmpbuf) - 1) != TS_SUCCESS) {
     error.assign("failed to initialize plugin ")
@@ -146,7 +146,7 @@ RemapPluginInfo::init(std::string &error)
     result = false;
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 
   PluginDbg(_dbg_ctl(), "finished initializing plugin '%s'", _configPath.c_str());
 
@@ -186,11 +186,11 @@ RemapPluginInfo::initInstance(int argc, char **argv, void **ih, std::string &err
     opterr = 0;
     optarg = nullptr;
 
-    setPluginContext();
+    PluginThreadContext *previous = setPluginContext();
 
     res = new_instance_cb(argc, argv, ih, tmpbuf, sizeof(tmpbuf) - 1);
 
-    resetPluginContext();
+    resetPluginContext(previous);
 
     if (TS_SUCCESS != res) {
       error.assign("failed to create instance for plugin ")
@@ -209,13 +209,13 @@ RemapPluginInfo::initInstance(int argc, char **argv, void **ih, std::string &err
 void
 RemapPluginInfo::doneInstance(void *ih)
 {
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (delete_instance_cb) {
     delete_instance_cb(ih);
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 }
 
 TSRemapStatus
@@ -223,13 +223,13 @@ RemapPluginInfo::doRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 {
   TSRemapStatus result = TSREMAP_NO_REMAP;
 
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (do_remap_cb) {
     result = do_remap_cb(ih, rh, rri);
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 
   return result;
 }
@@ -237,13 +237,13 @@ RemapPluginInfo::doRemap(void *ih, TSHttpTxn rh, TSRemapRequestInfo *rri)
 void
 RemapPluginInfo::osResponse(void *ih, TSHttpTxn rh, int os_response_type)
 {
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (os_response_cb) {
     os_response_cb(ih, rh, os_response_type);
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 }
 
 RemapPluginInfo::~RemapPluginInfo() {}
@@ -251,38 +251,39 @@ RemapPluginInfo::~RemapPluginInfo() {}
 void
 RemapPluginInfo::indicatePreReload()
 {
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (pre_config_reload_cb) {
     pre_config_reload_cb();
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 }
 
 void
 RemapPluginInfo::indicatePostReload(TSRemapReloadStatus reloadStatus)
 {
-  setPluginContext();
+  PluginThreadContext *previous = setPluginContext();
 
   if (post_config_reload_cb) {
     post_config_reload_cb(reloadStatus);
   }
 
-  resetPluginContext();
+  resetPluginContext(previous);
 }
 
-inline void
+inline PluginThreadContext *
 RemapPluginInfo::setPluginContext()
 {
-  _tempContext        = pluginThreadContext;
-  pluginThreadContext = this;
-  PluginDbg(_dbg_ctl(), "change plugin context from dso-addr:%p to dso-addr:%p", pluginThreadContext, _tempContext);
+  PluginThreadContext *previous = pluginThreadContext;
+  pluginThreadContext           = this;
+  PluginDbg(_dbg_ctl(), "change plugin context from dso-addr:%p to dso-addr:%p", previous, pluginThreadContext);
+  return previous;
 }
 
 inline void
-RemapPluginInfo::resetPluginContext()
+RemapPluginInfo::resetPluginContext(PluginThreadContext *previous)
 {
-  PluginDbg(_dbg_ctl(), "change plugin context from dso-addr:%p to dso-addr:%p (restore)", this, pluginThreadContext);
-  pluginThreadContext = _tempContext;
+  PluginDbg(_dbg_ctl(), "change plugin context from dso-addr:%p to dso-addr:%p (restore)", pluginThreadContext, previous);
+  pluginThreadContext = previous;
 }
