@@ -758,7 +758,11 @@ StripeSM::aggWriteDone(int event, Event *e)
     dir_clear(&del_dir);
     for (int done = 0; done < this->_write_buffer.get_buffer_pos();) {
       Doc *doc = reinterpret_cast<Doc *>(this->_write_buffer.get_buffer() + done);
-      dir_set_offset(&del_dir, directory.header->write_pos + done);
+      // The directory stores a vol/block offset (see the insert paths, which use
+      // offset_to_vol_offset()); convert the raw byte position here too, otherwise
+      // directory.remove() searches for a key that never matches and the stale
+      // entries for this failed write are left behind.
+      dir_set_offset(&del_dir, this->offset_to_vol_offset(directory.header->write_pos + done));
       this->directory.remove(&doc->key, this, &del_dir);
       done += round_to_approx_size(doc->len);
     }
