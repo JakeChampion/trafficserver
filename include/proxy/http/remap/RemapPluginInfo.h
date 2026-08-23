@@ -105,12 +105,14 @@ protected:
   /* Utility to be used only with unit testing */
   std::string missingRequiredSymbolError(const std::string &pluginName, const char *required, const char *requiring = nullptr);
   template <class T> T *getFunctionSymbol(const char *symbol);
-  void                  setPluginContext();
-  void                  resetPluginContext();
+  /* Set this plugin as the current thread-local plugin context, returning the
+   * previous context so the caller can restore it. The previous context MUST be
+   * held in a stack local (not shared state) so concurrent doRemap() calls on
+   * different threads through the same RemapPluginInfo do not race. */
+  PluginThreadContext *setPluginContext();
+  void                 resetPluginContext(PluginThreadContext *previous);
 
   static constexpr const char *const _tag = "plugin_remap"; /** @brief log tag used by this class */
-
-  PluginThreadContext *_tempContext = nullptr;
 };
 
 /**
