@@ -300,7 +300,7 @@ UrlRewrite::_tableLookup(std::unique_ptr<URLTable> &h_table, URL *request_url, i
   url_mapping         *um        = nullptr;
   int                  ht_result = 0;
 
-  if (auto it = h_table->find(request_host); it != h_table->end()) {
+  if (auto it = h_table->find(std::string_view{request_host, static_cast<size_t>(request_host_len)}); it != h_table->end()) {
     ht_result = 1;
     ht_entry  = it->second;
   }

@@ -4174,7 +4174,10 @@ HttpSM::tunnel_handler_post_server(int event, HttpTunnelConsumer *c)
       break;
     case VC_EVENT_ERROR:
       t_state.current.state = HttpTransact::CONNECTION_CLOSED;
-      t_state.set_connect_fail(server_txn->get_netvc()->lerrno);
+      {
+        NetVConnection *nvc = server_txn->get_netvc();
+        t_state.set_connect_fail(nvc ? nvc->lerrno : ECONNABORTED);
+      }
       break;
     default:
       break;
@@ -6506,7 +6509,10 @@ HttpSM::handle_post_failure()
   tunnel.reset();
   // Server is down
   if (t_state.current.state == HttpTransact::STATE_UNDEFINED || t_state.current.state == HttpTransact::CONNECTION_ALIVE) {
-    t_state.set_connect_fail(server_txn->get_netvc()->lerrno);
+    {
+      NetVConnection *nvc = server_txn->get_netvc();
+      t_state.set_connect_fail(nvc ? nvc->lerrno : ECONNABORTED);
+    }
     t_state.current.state = HttpTransact::CONNECTION_CLOSED;
   }
   call_transact_and_set_next_state(HttpTransact::HandleResponse);
@@ -6632,7 +6638,10 @@ HttpSM::handle_server_setup_error(int event, void *data)
     break;
   case VC_EVENT_ERROR:
     t_state.current.state = HttpTransact::CONNECTION_ERROR;
-    t_state.set_connect_fail(server_txn->get_netvc()->lerrno);
+    {
+      NetVConnection *nvc = server_txn->get_netvc();
+      t_state.set_connect_fail(nvc ? nvc->lerrno : ECONNABORTED);
+    }
     break;
   case VC_EVENT_ACTIVE_TIMEOUT:
     t_state.set_connect_fail(ETIMEDOUT);

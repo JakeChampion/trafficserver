@@ -29,6 +29,7 @@
 
 #include <tsutil/PostScript.h>
 #include <tsutil/Metrics.h>
+#include <tsutil/AtomicSharedPtr.h>
 
 #include "ts/ts.h"
 #include "tscore/ink_defs.h"
@@ -69,11 +70,18 @@ const char *dictionary = nullptr;
 
 static const char *global_hidden_header_name = nullptr;
 
-static TSMutex compress_config_mutex = nullptr;
+// The current global configuration.  A transaction holds a reference to the one
+// it started with for as long as it runs, so a reload publishes a new
+// configuration without being able to free a configuration still in use.
+AtomicSharedPtr<Configuration> cur_config;
 
-// Current global configuration, and the previous one (for cleanup)
-Configuration *cur_config  = nullptr;
-Configuration *prev_config = nullptr;
+// What a transaction needs to keep for its lifetime.  config is the reference
+// that keeps hc alive; a remap rule leaves it empty because the remap instance
+// owns that configuration and core holds the instance for the transaction.
+struct TransactionState {
+  std::shared_ptr<Configuration> config;
+  HostConfiguration             *hc;
+};
 
 namespace
 {
@@ -250,7 +258,7 @@ vary_header(TSMBuffer bufp, TSMLoc hdr_loc)
     count = TSMimeHdrFieldValuesCount(bufp, hdr_loc, ce_loc);
     for (idx = 0; idx < count; idx++) {
       const char *value = TSMimeHdrFieldValueStringGet(bufp, hdr_loc, ce_loc, idx, &len);
-      if (len && strncasecmp("Accept-Encoding", value, len) == 0) {
+      if (len == TS_MIME_LEN_ACCEPT_ENCODING && strncasecmp(TS_MIME_FIELD_ACCEPT_ENCODING, value, len) == 0) {
         // Bail, Vary: Accept-Encoding already sent from origin
         TSHandleMLocRelease(bufp, hdr_loc, ce_loc);
         return TS_SUCCESS;
@@ -771,21 +779,18 @@ transformable(TSHttpTxn txnp, bool server, HostConfiguration *host_configuration
   return client_accepts_compression(txnp, server, host_configuration, compress_type, algorithms);
 }
 
+// Add Vary to the origin response, which is the copy that gets cached.  There is
+// no equivalent for a cache hit: TSHttpTxnCachedRespGet hands back the cached
+// object's own header heap, which is not writeable, so every field call on it
+// fails.  The response the client receives is covered by SEND_RESPONSE_HDR.
 static void
-add_vary_header_for_compressible_content(TSHttpTxn txnp, bool server, HostConfiguration * /* hc ATS_UNUSED */)
+add_vary_header_to_origin_response(TSHttpTxn txnp)
 {
   TSMBuffer resp_buf;
   TSMLoc    resp_loc;
 
-  // Get the response headers
-  if (server) {
-    if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
-  } else {
-    if (TS_SUCCESS != TSHttpTxnCachedRespGet(txnp, &resp_buf, &resp_loc)) {
-      return;
-    }
+  if (TS_SUCCESS != TSHttpTxnServerRespGet(txnp, &resp_buf, &resp_loc)) {
+    return;
   }
 
   // Add Vary: Accept-Encoding header
@@ -824,7 +829,7 @@ compress_transform_add(TSHttpTxn txnp, HostConfiguration *hc, int compress_type,
 }
 
 static void
-handle_compression_and_vary(TSHttpTxn txnp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
+handle_compression_and_vary(TSHttpTxn txnp, TSCont contp, bool server, HostConfiguration *hc, int *compress_type, int *algorithms)
 {
   // Check if content is compressible and add compression if client accepts it
   bool content_is_compressible;
@@ -834,7 +839,13 @@ handle_compression_and_vary(TSHttpTxn txnp, bool server, HostConfiguration *hc, 
 
   // Add Vary: Accept-Encoding for all compressible content to ensure proper HTTP caching
   if (content_is_compressible) {
-    add_vary_header_for_compressible_content(txnp, server, hc);
+    if (server) {
+      add_vary_header_to_origin_response(txnp);
+    }
+    // Whatever the response was built from, the copy the client receives is the
+    // one a downstream cache stores, so it is the one that has to say what it
+    // varies on.  TSHttpTxnHookAdd ignores a continuation already on the list.
+    TSHttpTxnHookAdd(txnp, TS_HTTP_SEND_RESPONSE_HDR_HOOK, contp);
   }
 }
 
@@ -850,11 +861,7 @@ find_host_configuration(TSHttpTxn /* txnp ATS_UNUSED */, TSMBuffer bufp, TSMLoc 
     strv = TSMimeHdrFieldValueStringGet(bufp, locp, fieldp, -1, &strl);
     TSHandleMLocRelease(bufp, locp, fieldp);
   }
-  if (config == nullptr) {
-    host_configuration = cur_config->find(strv, strl);
-  } else {
-    host_configuration = config->find(strv, strl);
-  }
+  host_configuration = config->find(strv, strl);
   return host_configuration;
 }
 
@@ -864,7 +871,8 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
   TSHttpTxn          txnp          = static_cast<TSHttpTxn>(edata);
   int                compress_type = COMPRESSION_TYPE_DEFAULT;
   int                algorithms    = ALGORITHM_DEFAULT;
-  HostConfiguration *hc            = static_cast<HostConfiguration *>(TSContDataGet(contp));
+  TransactionState  *state         = static_cast<TransactionState *>(TSContDataGet(contp));
+  HostConfiguration *hc            = state->hc;
 
   switch (event) {
   case TS_EVENT_HTTP_READ_RESPONSE_HDR:
@@ -882,7 +890,7 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
         }
       }
 
-      handle_compression_and_vary(txnp, true, hc, &compress_type, &algorithms);
+      handle_compression_and_vary(txnp, contp, true, hc, &compress_type, &algorithms);
     }
     break;
 
@@ -908,7 +916,7 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
     if (TS_ERROR != TSHttpTxnCacheLookupStatusGet(txnp, &obj_status) && (TS_CACHE_LOOKUP_HIT_FRESH == obj_status)) {
       if (hc != nullptr) {
         info("handling compression of cached object");
-        handle_compression_and_vary(txnp, false, hc, &compress_type, &algorithms);
+        handle_compression_and_vary(txnp, contp, false, hc, &compress_type, &algorithms);
       }
     } else {
       // Prepare for going to origin
@@ -917,8 +925,21 @@ transform_plugin(TSCont contp, TSEvent event, void *edata)
     }
   } break;
 
+  case TS_EVENT_HTTP_SEND_RESPONSE_HDR: {
+    TSMBuffer resp_buf;
+    TSMLoc    resp_loc;
+
+    if (TSHttpTxnClientRespGet(txnp, &resp_buf, &resp_loc) == TS_SUCCESS) {
+      if (vary_header(resp_buf, resp_loc) != TS_SUCCESS) {
+        error("failed to add the Vary header to the client response");
+      }
+      TSHandleMLocRelease(resp_buf, TS_NULL_MLOC, resp_loc);
+    }
+  } break;
+
   case TS_EVENT_HTTP_TXN_CLOSE:
-    // Release the ocnif lease, and destroy this continuation
+    // Releasing this reference is what lets a replaced configuration go away.
+    delete state;
     TSContDestroy(contp);
     break;
 
@@ -949,19 +970,46 @@ handle_request(TSHttpTxn txnp, Configuration *config)
   HostConfiguration *hc;
 
   if (TSHttpTxnClientReqGet(txnp, &req_buf, &req_loc) == TS_SUCCESS) {
+    // A remap rule passes its own configuration, which core keeps alive for the
+    // transaction.  The global one has to be pinned here instead.
+    std::shared_ptr<Configuration> global_config;
+
     if (config == nullptr) {
-      hc = find_host_configuration(txnp, req_buf, req_loc, nullptr);
-    } else {
-      hc = find_host_configuration(txnp, req_buf, req_loc, config);
+      global_config = cur_config.load(std::memory_order_acquire);
+      config        = global_config.get();
     }
+    hc = find_host_configuration(txnp, req_buf, req_loc, config);
+
     bool allowed = false;
 
     if (hc->enabled()) {
       if (hc->has_allows()) {
-        int   url_len;
-        char *url = TSHttpTxnEffectiveUrlStringGet(txnp, &url_len);
-        allowed   = hc->is_url_allowed(url, url_len);
-        TSfree(url);
+        TSMLoc url_loc;
+
+        // Match against the path, which is the form the documentation and
+        // sample.compress.config use.  Matching the effective URL instead would
+        // mean no pattern anchored at / could ever match, and because a list of
+        // allows with nothing matching denies the request, that turns
+        // compression off rather than merely failing to enable it.
+        if (TSHttpHdrUrlGet(req_buf, req_loc, &url_loc) == TS_SUCCESS) {
+          int         path_len  = 0;
+          int         query_len = 0;
+          const char *path      = TSUrlPathGet(req_buf, url_loc, &path_len);
+          const char *query     = TSUrlHttpQueryGet(req_buf, url_loc, &query_len);
+          std::string target;
+
+          target.reserve(1 + path_len + (query_len ? 1 + query_len : 0));
+          target.push_back('/');
+          if (path != nullptr) {
+            target.append(path, path_len);
+          }
+          if (query != nullptr && query_len > 0) {
+            target.push_back('?');
+            target.append(query, query_len);
+          }
+          allowed = hc->is_url_allowed(target.data(), target.size());
+          TSHandleMLocRelease(req_buf, req_loc, url_loc);
+        }
       } else {
         allowed = true;
       }
@@ -969,7 +1017,7 @@ handle_request(TSHttpTxn txnp, Configuration *config)
     if (allowed) {
       TSCont transform_contp = TSContCreate(transform_plugin, nullptr);
 
-      TSContDataSet(transform_contp, (void *)hc);
+      TSContDataSet(transform_contp, new TransactionState{std::move(global_config), hc});
 
       info("Kicking off compress plugin for request");
       normalize_accept_encoding(txnp, req_buf, req_loc);
@@ -1004,20 +1052,12 @@ transform_global_plugin(TSCont /* contp ATS_UNUSED */, TSEvent event, void *edat
 static void
 load_global_configuration(TSCont contp)
 {
-  const char    *path      = static_cast<const char *>(TSContDataGet(contp));
-  Configuration *newconfig = Configuration::Parse(path);
-  Configuration *oldconfig = __sync_lock_test_and_set(&cur_config, newconfig);
+  const char                    *path = static_cast<const char *>(TSContDataGet(contp));
+  std::shared_ptr<Configuration> newconfig(Configuration::Parse(path));
 
-  debug("config swapped, old config %p", oldconfig);
+  auto oldconfig = cur_config.exchange(std::move(newconfig), std::memory_order_acq_rel);
 
-  // need a mutex for when there are multiple reloads going on
-  TSMutexLock(compress_config_mutex);
-  if (prev_config) {
-    debug("deleting previous configuration container, %p", prev_config);
-    delete prev_config;
-  }
-  prev_config = oldconfig;
-  TSMutexUnlock(compress_config_mutex);
+  debug("config swapped, old config %p", oldconfig.get());
 }
 
 static int
@@ -1034,8 +1074,7 @@ management_update(TSCont contp, TSEvent event, void * /* edata ATS_UNUSED */)
 void
 TSPluginInit(int argc, const char *argv[])
 {
-  const char *config_path         = nullptr;
-  Compress::compress_config_mutex = TSMutexCreate();
+  const char *config_path = nullptr;
 
   if (argc > 2) {
     fatal("the compress plugin does not accept more than 1 plugin argument");

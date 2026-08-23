@@ -21,6 +21,33 @@
 # Update the PKGDATE with the new version date when making a new clang-format binary package.
 PKGDATE="20240430"
 
+# Download the clang-format package, retrying on failure.  The format target
+# depends on this one host, and a single attempt means a few seconds of it being
+# unreachable fails the whole target -- which reads, to anyone looking at a CI
+# log, exactly like the code being misformatted.
+#
+# The retry is written out here rather than passing curl --retry-all-errors so
+# that the script keeps working with the curl on distributions still in support:
+# that option arrived in curl 7.71, and RHEL 8 ships 7.61.
+function fetch_package() {
+  local delay=5
+  local attempt
+
+  for attempt in 1 2 3 ; do
+    if [ ${attempt} -gt 1 ] ; then
+      echo "Download failed, retrying in ${delay}s (attempt ${attempt} of 3)."
+      sleep ${delay}
+      delay=$((delay * 2))
+    fi
+    # --fail so an error page is reported here rather than as a checksum mismatch
+    # later, --connect-timeout so an unresponsive host does not sit for the
+    # default two minutes on every attempt.
+    ${CURL} -L --progress-bar --fail --connect-timeout 30 -o ${ARCHIVE} ${URL} && return 0
+  done
+
+  return 1
+}
+
 function main() {
   set -e # exit on error
 
@@ -76,7 +103,14 @@ function main() {
 
   # Note that the two spaces between the hash and ${ARCHIVE) is needed
   if [ ! -e ${FORMAT} -o ! -e ${ROOT}/${PACKAGE} ] ; then
-    ${CURL} -L --progress-bar -o ${ARCHIVE} ${URL}
+    if ! fetch_package ; then
+      echo ""
+      echo "Could not download ${URL}"
+      echo ""
+      echo "This is a download failure, not a formatting error.  The pinned clang-format"
+      echo "is fetched from ci.trafficserver.apache.org, and 3 attempts to reach it failed."
+      exit 3
+    fi
     ${TAR} -x -C ${ROOT} -f ${ARCHIVE}
     cat > ${ROOT}/sha256 << EOF
 1a42578eab04aa697fa90537decc840c11d36d351249c1c8ded0197c2f9bdd7b  ${ARCHIVE}

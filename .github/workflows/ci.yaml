@@ -102,12 +102,31 @@ jobs:
           enable-cache: true
 
       # tools/clang-format.sh downloads a pinned clang-format (the system one is
-      # rejected on a version mismatch) into $GIT_COMMON_DIR/fmt.
+      # rejected on a version mismatch) into $GIT_COMMON_DIR/fmt.  Key the cache on
+      # the pinned version rather than on a hash of the script, so that editing the
+      # script does not force everyone to download the same binary again.
+      - name: Resolve the pinned clang-format version
+        id: clang-format
+        run: |
+          pkgdate=$(sed -n 's/^PKGDATE="\(.*\)"/\1/p' tools/clang-format.sh)
+          if [ -z "${pkgdate}" ]; then
+            echo "::error::Could not read PKGDATE from tools/clang-format.sh"
+            exit 1
+          fi
+          echo "pkgdate=${pkgdate}" >> "$GITHUB_OUTPUT"
+
+      # Caches are scoped to the branch that wrote them, plus the base and default
+      # branches, so a run on a branch that has not built before still downloads.
       - name: Cache pinned clang-format
         uses: actions/cache@v4
         with:
           path: .git/fmt
-          key: clang-format-${{ hashFiles('tools/clang-format.sh') }}
+          key: clang-format-${{ steps.clang-format.outputs.pkgdate }}
+
+      # Kept separate from the formatting run so that a failure to fetch the binary
+      # is reported as its own red step, rather than looking like misformatted code.
+      - name: Install the pinned clang-format
+        run: ./tools/clang-format.sh --install
 
       - name: Configure
         run: cmake -S . --preset ci
@@ -202,6 +221,11 @@ jobs:
             libjansson-dev libmaxminddb-dev libhiredis-dev \
             python3-dev ncat telnet curl iproute2 nghttp2-client \
             clang
+          # The compress tests decode responses by shelling out to brotli and
+          # zstd, which are packaged separately from the libraries the build
+          # links against. Those tests gate on the ATS feature rather than on
+          # the tool, so a runner without them fails rather than skipping.
+          sudo apt-get install -y --no-install-recommends brotli zstd
 
       # accept_timeout drives the client with "nc -c <script>". The Fedora images
       # upstream CI uses provide nc from nmap-ncat, which kills the exec'd child as
