@@ -969,6 +969,13 @@ HdrHeap::unmarshal(int buf_length, int obj_type, HdrHeapObjImpl **found_obj, Ref
     // Object length cannot be 0 by design, otherwise something is wrong + infinite loop here!
     ink_release_assert(0 != obj->m_length);
 
+    // The object body must lie entirely within the heap; a corrupt/hostile
+    // marshalled length would otherwise drive out-of-bounds access below.
+    if (obj->m_length < 0 || obj_data + obj->m_length > m_free_start) {
+      ink_assert(!"HdrHeap::unmarshal object exceeds heap bounds");
+      return -1;
+    }
+
     if (obj->m_type == static_cast<unsigned>(obj_type) && *found_obj == nullptr) {
       *found_obj = obj;
     }
@@ -981,6 +988,13 @@ HdrHeap::unmarshal(int buf_length, int obj_type, HdrHeapObjImpl **found_obj, Ref
       ((URLImpl *)obj)->unmarshal(offset);
       break;
     case HdrHeapObjType::FIELD_BLOCK:
+      // m_freetop is read straight from the marshalled buffer and indexes the
+      // fixed-size m_field_slots[MIME_FIELD_BLOCK_SLOTS] array; reject a value
+      // that would run past the end of the slots.
+      if (reinterpret_cast<MIMEFieldBlockImpl *>(obj)->m_freetop > MIME_FIELD_BLOCK_SLOTS) {
+        ink_assert(!"HdrHeap::unmarshal invalid field block m_freetop");
+        return -1;
+      }
       ((MIMEFieldBlockImpl *)obj)->unmarshal(offset);
       break;
     case HdrHeapObjType::MIME_HEADER:
