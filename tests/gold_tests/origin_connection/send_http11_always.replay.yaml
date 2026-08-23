@@ -1,0 +1,82 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# proxy.config.http.send_http11_requests=1 is the default: ATS always speaks
+# HTTP/1.1 to the origin. The outgoing request line is observed via the
+# http_hdrs header dump in the debug log and no HTTP/1.0 request line may
+# appear anywhere.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify send_http11_requests=1 keeps origin requests at HTTP/1.1'
+
+  server:
+    name: 'server-http11'
+
+  client:
+    name: 'client-http11'
+
+  ats:
+    name: 'ts-http11'
+
+    process_config:
+      enable_cache: false
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|http_hdrs'
+      proxy.config.http.send_http11_requests: 1
+
+    remap_config:
+      - 'map http://example.com/ http://127.0.0.1:{SERVER_HTTP_PORT}/'
+
+    log_validation:
+      traffic_out:
+        contains:
+          - expression: 'GET /outbound-version-check HTTP/1\.1'
+            description: 'The origin-bound request must be HTTP/1.1'
+        excludes:
+          - expression: 'HTTP/1\.0'
+            description: 'No HTTP/1.0 request line may be sent'
+
+sessions:
+- transactions:
+
+  - client-request:
+      method: GET
+      url: /outbound-version-check
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [uuid, send-http11]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: data
+
+    proxy-response:
+      status: 200

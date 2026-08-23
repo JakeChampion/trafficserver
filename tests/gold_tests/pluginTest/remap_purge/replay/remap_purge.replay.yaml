@@ -1,0 +1,233 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# remap_purge provides a REST style PURGE for a whole remap rule: an
+# authorized PURGE (the secret is carried in the configured header) bumps the
+# rule's cache generation (proxy.config.http.cache.generation), instantly
+# invalidating everything cached under the rule. An unauthorized PURGE falls
+# through to the core's single-object PURGE handling and must not touch the
+# generation.
+#
+
+# The ATS configuration for this replay lives in remap_purge.test.py: the
+# plugin's state file needs an absolute sandbox path, which the replay file
+# format cannot express.
+
+meta:
+  version: "1.0"
+
+sessions:
+- transactions:
+
+  # Populate the cache.
+  - client-request:
+      method: GET
+      url: /object
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, purge-fill]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+        - [Cache-Control, 'max-age=300']
+      content:
+        encoding: plain
+        data: old1
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'miss', as: equal }]
+
+  # Confirm the object is served from cache.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /object
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, purge-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: xxxx
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+      content:
+        encoding: plain
+        data: old1
+        verify: { as: equal }
+
+  # A PURGE with the wrong secret is not authorized: it falls through to the
+  # core single-object PURGE for a URL that is not in the cache, so it gets a
+  # 404 and must not bump the generation.
+  - client-request:
+      method: PURGE
+      url: /not/in/cache
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [ATS-Purger, 'wrong-secret']
+        - [uuid, purge-denied]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 404
+
+  # The cached object must still be served from cache after the failed PURGE.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /object
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, purge-still-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: xxxx
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+
+  # An authorized PURGE (any path under the rule) bumps the generation and is
+  # answered with a 200 by the plugin.
+  - client-request:
+      method: PURGE
+      url: /any/path
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [ATS-Purger, 'purge-secret-123']
+        - [uuid, purge-authorized]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+
+  # The generation changed, so the previously cached object misses and is
+  # refetched from the origin.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /object
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, purge-refetch]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+        - [Cache-Control, 'max-age=300']
+      content:
+        encoding: plain
+        data: new2
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'miss', as: equal }]
+      content:
+        encoding: plain
+        data: new2
+        verify: { as: equal }
+
+  # The refetched object is cached under the new generation.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /object
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, purge-new-gen-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: xxxx
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+      content:
+        encoding: plain
+        data: new2
+        verify: { as: equal }

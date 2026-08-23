@@ -1,0 +1,120 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# With cachekey's --sort-params=true the query parameters are sorted in the
+# cache key, so two requests whose query strings differ only in parameter
+# order must resolve to the same cache entry. The sorted key is observable
+# through xdebug's X-Cache-Key header.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify cachekey --sort-params makes parameter order irrelevant to the cache key'
+
+  server:
+    name: 'server-sort'
+
+  client:
+    name: 'client-sort'
+
+  ats:
+    name: 'ts-sort'
+
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|cachekey'
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache,x-cache-key'
+
+    remap_config:
+      - from: 'http://example.com/'
+        to: 'http://127.0.0.1:{SERVER_HTTP_PORT}/'
+        plugins:
+          - name: 'cachekey.so'
+            args: ['--sort-params=true']
+
+sessions:
+- transactions:
+
+  # Populate the cache with unsorted query parameters. The cache key must
+  # contain them in sorted order.
+  - client-request:
+      method: GET
+      url: '/sorted/object?c=3&a=1&b=2'
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, 'x-cache,x-cache-key']
+        - [uuid, sort-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+        - [Cache-Control, 'max-age=300']
+      content:
+        encoding: plain
+        data: data
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'miss', as: equal }]
+        - [X-Cache-Key, { value: 'a=1&b=2&c=3', as: contains }]
+
+  # A different parameter order must hit the same cache entry.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: '/sorted/object?b=2&c=3&a=1'
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, 'x-cache,x-cache-key']
+        - [uuid, sort-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: xxxx
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+        - [X-Cache-Key, { value: 'a=1&b=2&c=3', as: contains }]
+      content:
+        encoding: plain
+        data: data
+        verify: { as: equal }

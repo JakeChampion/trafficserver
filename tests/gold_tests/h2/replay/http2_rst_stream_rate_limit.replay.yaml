@@ -1,0 +1,176 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# The HTTP/2 "rapid reset" attack (CVE-2023-44487) opens streams and
+# immediately cancels them with RST_STREAM, making the server do request
+# setup work without ever counting against the concurrent stream limit.
+# proxy.config.http2.max_rst_stream_frames_per_minute bounds how many client
+# RST_STREAM frames a connection may receive per minute; past the limit the
+# connection is torn down with a GOAWAY(ENHANCE_YOUR_CALM).
+#
+# The limit is set to 3 and the client resets five streams in quick
+# succession. The origin delays each response so every stream is still open
+# when its RST_STREAM arrives (resets of already-closed streams are ignored
+# and not counted). The fourth reset exceeds the limit, so the connection is
+# closed and the remaining transactions fail, which is why the client and
+# server processes may exit non-zero.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify max_rst_stream_frames_per_minute closes rapid-reset connections'
+
+  server:
+    name: 'server'
+    # ATS cancels origin transactions when the client resets the stream, so
+    # the server may see incomplete transactions.
+    return_code: [0, 1]
+
+  client:
+    name: 'client'
+    # The connection is destroyed after the limit is exceeded, so the
+    # remaining transactions fail.
+    return_code: [0, 1]
+
+  ats:
+    name: 'ts'
+
+    process_config:
+      enable_tls: true
+      enable_cache: false
+      # Tearing the connection down logs an expected HTTP/2 connection error,
+      # which the default diags.log checks would reject.
+      disable_log_checks: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http2_con|http2'
+      proxy.config.http2.max_rst_stream_frames_per_minute: 3
+
+    remap_config:
+      - 'map / http://127.0.0.1:{SERVER_HTTP_PORT}/'
+
+    metric_checks:
+      - metric: 'proxy.process.http2.max_rst_stream_frames_per_minute_exceeded'
+        min: 1
+
+    log_validation:
+      traffic_out:
+        contains:
+          - expression: 'Observed too frequent RST_STREAM frames'
+            description: 'The RST_STREAM frequency limit must trip'
+      diags_log:
+        contains:
+          - expression: 'HTTP/2 connection error code=0x0b.*reset too frequent RST_STREAM frames'
+            description: 'The connection must be closed with ENHANCE_YOUR_CALM'
+
+  blocks:
+  - delayed_response: &delayed_response
+      delay: 2s
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: data
+
+sessions:
+- protocol:
+    stack: http2
+    tls:
+      sni: test_sni
+
+  transactions:
+
+  - client-request:
+      frames:
+      - HEADERS:
+          headers:
+            fields:
+            - [':method', GET]
+            - [':scheme', https]
+            - [':authority', example.com]
+            - [':path', /rst/1]
+            - [uuid, rst-1]
+      - RST_STREAM:
+          delay: 100ms
+          error-code: CANCEL
+    server-response: *delayed_response
+
+  - client-request:
+      frames:
+      - HEADERS:
+          headers:
+            fields:
+            - [':method', GET]
+            - [':scheme', https]
+            - [':authority', example.com]
+            - [':path', /rst/2]
+            - [uuid, rst-2]
+      - RST_STREAM:
+          delay: 100ms
+          error-code: CANCEL
+    server-response: *delayed_response
+
+  - client-request:
+      frames:
+      - HEADERS:
+          headers:
+            fields:
+            - [':method', GET]
+            - [':scheme', https]
+            - [':authority', example.com]
+            - [':path', /rst/3]
+            - [uuid, rst-3]
+      - RST_STREAM:
+          delay: 100ms
+          error-code: CANCEL
+    server-response: *delayed_response
+
+  - client-request:
+      frames:
+      - HEADERS:
+          headers:
+            fields:
+            - [':method', GET]
+            - [':scheme', https]
+            - [':authority', example.com]
+            - [':path', /rst/4]
+            - [uuid, rst-4]
+      - RST_STREAM:
+          delay: 100ms
+          error-code: CANCEL
+    server-response: *delayed_response
+
+  - client-request:
+      frames:
+      - HEADERS:
+          headers:
+            fields:
+            - [':method', GET]
+            - [':scheme', https]
+            - [':authority', example.com]
+            - [':path', /rst/5]
+            - [uuid, rst-5]
+      - RST_STREAM:
+          delay: 100ms
+          error-code: CANCEL
+    server-response: *delayed_response

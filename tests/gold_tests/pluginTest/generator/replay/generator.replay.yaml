@@ -1,0 +1,214 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# The generator remap plugin intercepts the transaction and acts as a
+# synthetic origin: the first path component selects cacheability ("cache"
+# responses carry "Cache-Control: max-age=<n>, public", "nocache" responses
+# carry "Cache-Control: private") and the second path component is the body
+# size in bytes. The Proxy Verifier server below is never contacted; it only
+# exists to satisfy the test framework.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify the generator plugin synthesizes responses of the requested size and cacheability'
+
+  server:
+    name: 'server'
+
+  client:
+    name: 'client'
+
+  ats:
+    name: 'ts'
+
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|generator'
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache'
+
+    remap_config:
+      - from: 'http://workload.example.com/'
+        to: 'http://127.0.0.1:{SERVER_HTTP_PORT}/'
+        plugins:
+          - name: 'generator.so'
+            args: []
+
+    metric_checks:
+      # All transactions except the cache hit are answered by the generator.
+      - metric: 'generator.response_count'
+        min: 4
+
+sessions:
+- transactions:
+
+  # A 10 byte cacheable object misses the cache and is generated.
+  - client-request:
+      method: GET
+      url: /cache/10/object1
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [x-debug, x-cache]
+        - [uuid, gen-cache-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Content-Length, { value: '10', as: equal }]
+        - [Cache-Control, { value: 'public', as: contains }]
+        - [X-Cache, { value: 'miss', as: equal }]
+
+  # The same URL is served from the cache on the second request.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /cache/10/object1
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [x-debug, x-cache]
+        - [uuid, gen-cache-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Content-Length, { value: '10', as: equal }]
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+
+  # A nocache object is generated with the requested size and is not cached.
+  # The plugin turns the cache off entirely for nocache paths, so xdebug
+  # reports the cache lookup as skipped.
+  - client-request:
+      method: GET
+      url: /nocache/25/object2
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [x-debug, x-cache]
+        - [uuid, gen-nocache-1]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Content-Length, { value: '25', as: equal }]
+        - [Cache-Control, { value: 'private', as: equal }]
+        - [X-Cache, { value: 'skipped', as: equal }]
+
+  # The object was not cached, so the repeat request is not a cache hit.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: /nocache/25/object2
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [x-debug, x-cache]
+        - [uuid, gen-nocache-2]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Content-Length, { value: '25', as: equal }]
+        - [X-Cache, { value: 'skipped', as: equal }]
+
+  # A HEAD request gets the headers for the object without a body.
+  - client-request:
+      method: HEAD
+      url: /cache/40/object3
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [uuid, gen-head]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
+
+  # A POST with a body is accepted and answered with a generated response.
+  - client-request:
+      method: POST
+      url: /cache/8/object4
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, workload.example.com]
+        - [Content-Length, '8']
+        - [uuid, gen-post]
+      content:
+        encoding: plain
+        data: postdata
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '0']
+
+    proxy-response:
+      status: 200
