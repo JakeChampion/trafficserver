@@ -1,0 +1,116 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# With cachekey's --remove-all-params=true the query string is excluded from
+# the cache key, so requests for the same path with entirely different query
+# strings must share one cache entry.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify cachekey --remove-all-params excludes the query from the cache key'
+
+  server:
+    name: 'server-remove'
+
+  client:
+    name: 'client-remove'
+
+  ats:
+    name: 'ts-remove'
+
+    process_config:
+      enable_cache: true
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|cachekey'
+
+    plugin_config:
+      - 'xdebug.so --enable=x-cache'
+
+    remap_config:
+      - from: 'http://example.com/'
+        to: 'http://127.0.0.1:{SERVER_HTTP_PORT}/'
+        plugins:
+          - name: 'cachekey.so'
+            args: ['--remove-all-params=true']
+
+sessions:
+- transactions:
+
+  # Populate the cache. The query string is not part of the cache key.
+  - client-request:
+      method: GET
+      url: '/stripped/object?version=1'
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, remove-miss]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+        - [Cache-Control, 'max-age=300']
+      content:
+        encoding: plain
+        data: data
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'miss', as: equal }]
+
+  # A completely different query string must still hit the cache.
+  - client-request:
+      delay: 100ms
+      method: GET
+      url: '/stripped/object?version=2&other=param'
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [x-debug, x-cache]
+        - [uuid, remove-hit]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: xxxx
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [X-Cache, { value: 'hit-fresh', as: equal }]
+      content:
+        encoding: plain
+        data: data
+        verify: { as: equal }

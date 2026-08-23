@@ -1,0 +1,85 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# The Via product token defaults to "ApacheTrafficServer/<version>" but
+# operators can rebrand it via proxy.config.http.request_via_str (Via header
+# sent to the origin) and proxy.config.http.response_via_str (Via header sent
+# to the client). Verify both custom strings show up in the respective Via
+# headers.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify custom request_via_str and response_via_str product tokens'
+
+  server:
+    name: 'server'
+
+  client:
+    name: 'client'
+
+  ats:
+    name: 'ts'
+
+    process_config:
+      enable_cache: false
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http'
+      proxy.config.http.insert_request_via_str: 1
+      proxy.config.http.insert_response_via_str: 1
+      proxy.config.http.request_via_str: 'CustomRequestViaProduct'
+      proxy.config.http.response_via_str: 'CustomResponseViaProduct'
+
+    remap_config:
+      - 'map http://example.com/ http://127.0.0.1:{SERVER_HTTP_PORT}/'
+
+sessions:
+- transactions:
+
+  - client-request:
+      method: GET
+      url: /via/custom
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [uuid, via-custom]
+
+    proxy-request:
+      headers:
+        fields:
+        - [Via, { value: 'CustomRequestViaProduct', as: contains }]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: data
+
+    proxy-response:
+      status: 200
+      headers:
+        fields:
+        - [Via, { value: 'CustomResponseViaProduct', as: contains }]

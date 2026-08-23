@@ -41,7 +41,7 @@ autest:
     records_config:
       proxy.config.diags.debug.enabled: 1
       proxy.config.diags.debug.tags: 'http'
-      proxy.config.http.response_via_str: 3
+      proxy.config.http.insert_response_via_str: 3
       proxy.config.http.insert_age_in_response: 0
 
     remap_config:

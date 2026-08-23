@@ -1,0 +1,107 @@
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+#
+# The anonymize settings remove privacy sensitive headers from the client
+# request before it is forwarded to the origin, either via the dedicated
+# anonymize_remove_* toggles or via the arbitrary comma separated
+# anonymize_other_header_list. Headers not named by either mechanism must
+# be forwarded untouched.
+#
+
+meta:
+  version: "1.0"
+
+autest:
+  description: 'Verify anonymize_remove_* and anonymize_other_header_list strip request headers'
+
+  server:
+    name: 'server'
+
+  client:
+    name: 'client'
+
+  ats:
+    name: 'ts'
+
+    process_config:
+      enable_cache: false
+
+    records_config:
+      proxy.config.diags.debug.enabled: 1
+      proxy.config.diags.debug.tags: 'http|anon'
+      proxy.config.http.anonymize_remove_from: 1
+      proxy.config.http.anonymize_remove_referer: 1
+      proxy.config.http.anonymize_remove_user_agent: 1
+      proxy.config.http.anonymize_remove_cookie: 1
+      proxy.config.http.anonymize_remove_client_ip: 1
+      proxy.config.http.anonymize_other_header_list: 'X-Internal-Token, X-Trace-Context'
+
+    remap_config:
+      - 'map http://example.com/ http://127.0.0.1:{SERVER_HTTP_PORT}/'
+
+    log_validation:
+      traffic_out:
+        contains:
+          - expression: 'removing other headers \(X-Internal-Token, X-Trace-Context\)'
+            description: 'Verify the other-header list was parsed and acted upon'
+
+sessions:
+- transactions:
+
+  # All of the privacy sensitive headers are sent by the client and none of
+  # them may reach the origin. The unrelated X-Keep-Header must be forwarded.
+  - client-request:
+      method: GET
+      url: /privacy/strip
+      version: '1.1'
+      headers:
+        fields:
+        - [Host, example.com]
+        - [From, user@example.com]
+        - [Referer, 'http://referrer.example.com/page']
+        - [User-Agent, 'test-agent/1.0']
+        - [Cookie, 'session=deadbeef']
+        - [Client-ip, '10.1.2.3']
+        - [X-Internal-Token, 'super-secret']
+        - [X-Trace-Context, 'trace-id-1234']
+        - [X-Keep-Header, 'keep-me']
+        - [uuid, privacy-strip]
+
+    proxy-request:
+      headers:
+        fields:
+        - [From, { as: absent }]
+        - [Referer, { as: absent }]
+        - [User-Agent, { as: absent }]
+        - [Cookie, { as: absent }]
+        - [Client-ip, { as: absent }]
+        - [X-Internal-Token, { as: absent }]
+        - [X-Trace-Context, { as: absent }]
+        - [X-Keep-Header, { value: 'keep-me', as: equal }]
+
+    server-response:
+      status: 200
+      reason: OK
+      headers:
+        fields:
+        - [Content-Length, '4']
+      content:
+        encoding: plain
+        data: data
+
+    proxy-response:
+      status: 200
