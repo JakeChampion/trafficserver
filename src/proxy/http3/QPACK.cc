@@ -1159,7 +1159,19 @@ QPACK::_on_encoder_stream_read_ready(IOBufferReader &reader)
       }
       QPACKDebug("Received Insert With Name Ref: is_static=%d, index=%d, value=%.*s", is_static, index, static_cast<int>(value_len),
                  value);
-      StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
+      XpackLookupResult result;
+      if (is_static) {
+        result = StaticTable::lookup(index, &name, &name_len, &dummy, &dummy_len);
+      } else if (!this->_dynamic_table.is_empty()) {
+        result = this->_dynamic_table.lookup_relative(index, &name, &name_len, &dummy, &dummy_len);
+      } else {
+        result = {index, XpackLookupResult::MatchType::NONE};
+      }
+      if (result.match_type != XpackLookupResult::MatchType::EXACT) {
+        this->_arena.str_free(value);
+        this->_abort_decode();
+        return EVENT_DONE;
+      }
       this->_dynamic_table.insert_entry(name, name_len, value, value_len);
       this->_arena.str_free(value);
     } else if (buf & 0x40) { // Insert Without Name Reference
@@ -1225,6 +1237,10 @@ QPACK::estimate_header_block_size(const HTTPHdr & /* hdr ATS_UNUSED */)
 const XpackLookupResult
 QPACK::StaticTable::lookup(uint16_t index, const char **name, size_t *name_len, const char **value, size_t *value_len)
 {
+  if (index >= countof(STATIC_HEADER_FIELDS)) {
+    return {index, XpackLookupResult::MatchType::NONE};
+  }
+
   const Header &header = STATIC_HEADER_FIELDS[index];
   *name                = header.name;
   *name_len            = header.name_len;
