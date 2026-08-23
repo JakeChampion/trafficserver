@@ -24,6 +24,7 @@
 #pragma once
 
 #include <map>
+#include <vector>
 
 #include "swoc/IntrusiveDList.h"
 
@@ -111,8 +112,7 @@ private:
         _thread(thread),
         _continuation(continuation),
         _stream_id(stream_id),
-        _header_block(header_block),
-        _header_block_len(header_block_len),
+        _header_block(header_block, header_block + header_block_len),
         _hdr(hdr)
     {
     }
@@ -144,13 +144,13 @@ private:
     const uint8_t *
     header_block() const
     {
-      return this->_header_block;
+      return this->_header_block.data();
     }
 
     size_t
     header_block_len() const
     {
-      return this->_header_block_len;
+      return this->_header_block.size();
     }
 
     HTTPHdr &
@@ -175,13 +175,12 @@ private:
     };
 
   private:
-    uint16_t       _largest_reference;
-    EThread       *_thread;
-    Continuation  *_continuation;
-    uint64_t       _stream_id;
-    const uint8_t *_header_block;
-    size_t         _header_block_len;
-    HTTPHdr       &_hdr;
+    uint16_t             _largest_reference;
+    EThread             *_thread;
+    Continuation        *_continuation;
+    uint64_t             _stream_id;
+    std::vector<uint8_t> _header_block;
+    HTTPHdr             &_hdr;
 
     // For IntrusiveDList support
     DecodeRequest *_next = nullptr;
