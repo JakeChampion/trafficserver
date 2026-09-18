@@ -71,18 +71,20 @@ struct NetAcceptAction : public Action, public RefCountObjInHeap {
     _server.store(s, std::memory_order_release);
   }
 
-  /** Whether this action still owns an open listening socket.
+  /** Whether this action has not been cancelled yet.
 
-    Accept paths must consult this before dispatching EVENT_ERROR. It is
-    cleared by cancel() before Action::cancel() sets @c cancelled, so it goes
-    false no later than the cancellation the continuation is aware of, and it
-    is safe to read from any thread. Reading @c cancelled instead is both a
-    data race on a plain bool and too late: accept() reports EBADF as soon as
-    the socket closes, which is before @c cancelled is set.
+    This does not observe socket state; it reports whether cancel() has run.
+    Accept paths must consult it before dispatching EVENT_ERROR. cancel()
+    clears the server before closing the socket and before Action::cancel()
+    sets @c cancelled, so this goes false no later than the cancellation the
+    continuation is aware of, and it is safe to read from any thread. Reading
+    @c cancelled instead is both a data race on a plain bool and too late:
+    accept() reports EBADF as soon as the socket closes, which is before
+    @c cancelled is set.
 
   */
   bool
-  is_listening() const
+  is_active() const
   {
     return _server.load(std::memory_order_acquire) != nullptr;
   }
@@ -92,7 +94,7 @@ struct NetAcceptAction : public Action, public RefCountObjInHeap {
   {
     // Use atomic exchange so only one thread closes the server, preventing
     // use-after-free races between cancel() and acceptEvent() cleanup. This
-    // must stay ahead of Action::cancel(), see is_listening().
+    // must stay ahead of Action::cancel(), see is_active().
     Server *s = _server.exchange(nullptr, std::memory_order_acq_rel);
     if (s != nullptr) {
       s->close();
