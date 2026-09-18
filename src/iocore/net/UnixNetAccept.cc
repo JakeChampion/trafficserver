@@ -317,8 +317,9 @@ NetAccept::init_accept_per_thread()
 void
 NetAccept::stop_accept()
 {
+  // cancel() closes the server; touching it afterwards would race with an
+  // acceptEvent() that has already seen the cancellation and deleted us.
   action_->cancel();
-  server.close();
 }
 
 int
@@ -638,7 +639,6 @@ Ldone:
 
 Lerror:
   action_->cancel();
-  server.close();
   e->cancel();
   Metrics::Gauge::decrement(net_rsb.accepts_currently_open);
   delete this;
@@ -678,7 +678,6 @@ void
 NetAccept::cancel()
 {
   action_->cancel();
-  server.close();
 }
 
 NetAccept *
