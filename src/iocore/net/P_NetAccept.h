@@ -92,14 +92,14 @@ struct NetAcceptAction : public Action, public RefCountObjInHeap {
   void
   cancel(Continuation *cont = nullptr) override
   {
-    // Use atomic exchange so only one thread closes the server, preventing
-    // use-after-free races between cancel() and acceptEvent() cleanup. This
-    // must stay ahead of Action::cancel(), see is_active().
+    // The exchange is the once-guard: exactly one caller wins, so exactly one
+    // closes the server and flags the Action. Testing @c cancelled here
+    // instead is a data race on a plain bool that two cancellers can both read
+    // as false. The exchange must stay ahead of Action::cancel(), see
+    // is_active().
     Server *s = _server.exchange(nullptr, std::memory_order_acq_rel);
     if (s != nullptr) {
       s->close();
-    }
-    if (!cancelled) {
       Action::cancel(cont);
     }
   }
